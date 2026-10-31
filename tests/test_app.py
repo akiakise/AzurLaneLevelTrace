@@ -1,11 +1,99 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
+from urllib.error import HTTPError
 
 import app
 
 
 class AppTests(unittest.TestCase):
+    def test_fetch_wiki_text_retries_rate_limit(self):
+        class FakeHeaders:
+            def get_content_charset(self):
+                return "utf-8"
+
+        class FakeResponse:
+            def __init__(self):
+                self.headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return "{{舰娘图鉴}}".encode("utf-8")
+
+        with patch.object(
+            app,
+            "urlopen",
+            side_effect=[
+                HTTPError("https://example.test", 567, "Unknown Status", {}, None),
+                FakeResponse(),
+            ],
+        ), patch.object(
+            app, "acquire_wiki_request_slot", return_value=None
+        ), patch.object(app.time, "sleep") as sleep:
+            result = app.fetch_wiki_text("/test")
+
+        self.assertEqual(result, "{{舰娘图鉴}}")
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_fetch_wiki_text_solves_challenge(self):
+        class FakeHeaders:
+            def get_content_charset(self):
+                return "utf-8"
+
+        class FakeResponse:
+            def __init__(self, body):
+                self.body = body.encode("utf-8")
+                self.headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return self.body
+
+        challenge_body = """
+        <script>
+        var e={A:1,B:2,C:3},t=0;
+        return t+=e[_0x649a("0x0")],t+=e[_0x649a("0x1")],
+        t=e[_0x649a("0x2")](t,e[_0x649a("0x3")]),
+        [t,e[_0x649a("0x8")](n)][a]
+        document.cookie="__tst_status="+a(0)+"#;";
+        document.cookie=a(1)+";";
+        case"0":t+="EO_Bot_Ssid=";continue;
+        case"3":t=a[_0x649a("0x7")](t,9);continue;
+        </script>
+        """
+        requests = []
+
+        def urlopen_side_effect(request, timeout=25):
+            requests.append(request)
+            if len(requests) == 1:
+                return FakeResponse(challenge_body)
+            return FakeResponse("{{舰娘图鉴}}")
+
+        with patch.object(
+            app, "urlopen", side_effect=urlopen_side_effect
+        ), patch.object(
+            app, "acquire_wiki_request_slot", return_value=None
+        ), patch.object(app.time, "sleep"):
+            result = app.fetch_wiki_text("/test")
+
+        self.assertEqual(result, "{{舰娘图鉴}}")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            requests[1].get_header("Cookie"),
+            "__tst_status=6#; EO_Bot_Ssid=9",
+        )
+
     def test_extract_ship_entries(self):
         html = """
         <table>
@@ -22,8 +110,82 @@ class AppTests(unittest.TestCase):
             ],
         )
 
+    def test_fetch_release_entries_uses_backend_api(self):
+        responses = [
+            {
+                "query": {
+                    "results": {
+                        "古鹰": {
+                            "fulltext": "古鹰",
+                            "printouts": {"实装日期": ["2017年05月25日"]},
+                        }
+                    }
+                },
+                "query-continue-offset": 500,
+            },
+            {
+                "query": {
+                    "results": {
+                        "武藏": {
+                            "fulltext": "武藏",
+                            "printouts": {"实装日期": ["2023年08月17日"]},
+                        }
+                    }
+                },
+            },
+        ]
+
+        def fetch_wiki_api_side_effect(params):
+            self.assertEqual(params["action"], "ask")
+            self.assertIn(f"offset={(2 - len(responses)) * 500}", params["query"])
+            return responses.pop(0)
+
+        with patch("app.fetch_wiki_api", side_effect=fetch_wiki_api_side_effect):
+            entries = app.fetch_release_entries()
+
+        self.assertEqual(
+            entries,
+            [
+                {"name": "古鹰", "release_date": "2017-05-25"},
+                {"name": "武藏", "release_date": "2023-08-17"},
+            ],
+        )
+
+    def test_fetch_ship_raw_uses_revisions_api(self):
+        payload = {
+            "query": {
+                "pages": [
+                    {
+                        "revisions": [
+                            {
+                                "slots": {
+                                    "main": {"content": "{{舰娘图鉴}}"}
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        expected_params = {
+            "action": "query",
+            "titles": "武藏",
+            "prop": "revisions",
+            "rvprop": "content",
+            "rvslots": "main",
+            "redirects": "1",
+            "format": "json",
+            "formatversion": "2",
+        }
+
+        with patch("app.fetch_wiki_api", return_value=payload) as fetch_wiki_api:
+            raw_text = app.fetch_ship_raw("武藏")
+
+        fetch_wiki_api.assert_called_once_with(expected_params)
+        self.assertEqual(raw_text, "{{舰娘图鉴}}")
+
     def test_parse_ship_raw(self):
-        raw = """
+        raw = r"""
         {{舰娘图鉴
         |名称=武藏
         |类型=战列
@@ -38,9 +200,62 @@ class AppTests(unittest.TestCase):
         parsed = app.parse_ship_raw(raw)
         self.assertEqual(parsed["ship_type"], "战列")
         self.assertEqual(parsed["rarity"], "海上传奇")
-        self.assertEqual(len(parsed["tech_points"]), 3)
-        self.assertEqual(parsed["tech_points"][0]["attribute"], "耐久")
-        self.assertEqual(parsed["tech_points"][2]["attribute"], "炮击")
+        self.assertEqual(len(parsed["tech_points"]), 2)
+        self.assertEqual(parsed["tech_points"][0]["stage"], "解锁图鉴")
+        self.assertEqual(parsed["tech_points"][0]["attribute"], "战巡/战列/航战 耐久")
+        self.assertEqual(parsed["tech_points"][1]["stage"], "达到120级")
+        self.assertEqual(parsed["tech_points"][1]["attribute"], "战巡/战列/航战 炮击")
+
+    def test_parse_template_fields_removes_html_comments(self):
+        raw = r"""
+        {{舰娘图鉴
+        |类型=潜艇
+        |稀有度=超稀有\<!--选择【普通/稀有/精锐/超稀有/海上传奇/最高方案/决战方案】-->
+        }}
+        """
+        fields = app.parse_template_fields(raw)
+        self.assertEqual(fields["类型"], "潜艇")
+        self.assertEqual(fields["稀有度"], "超稀有")
+
+    def test_fetch_ship_payload_logs_raw_response_on_parse_failure(self):
+        entry = {"name": "杓鹬", "release_date": "2024-01-01"}
+        with patch(
+            "app.fetch_ship_raw", return_value="{{非目标模板}}"
+        ), patch("app.parse_ship_raw", return_value=None):
+            with self.assertRaises(ValueError), self.assertLogs(
+                "blhx_training_tracker", level="ERROR"
+            ) as logs:
+                app.fetch_ship_payload(entry)
+
+        self.assertTrue(any("{{非目标模板}}" in message for message in logs.output))
+
+    def test_init_db_cleans_existing_template_comments(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.DATA_DIR = Path(temp_dir)
+            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "易北·META",
+                    "2023-08-17",
+                    {
+                        "ship_type": "潜艇",
+                        "rarity": "超稀有",
+                        "tech_points": [],
+                    },
+                )
+                connection.execute(
+                    "UPDATE ships SET rarity = ? WHERE id = ?",
+                    (
+                        "超稀有<!--选择【普通/稀有/精锐/超稀有/海上传奇/最高方案/决战方案】-->",
+                        ship["id"],
+                    ),
+                )
+
+            app.init_db()
+            ships = app.list_ships({"name": "易北·META"})
+            self.assertEqual(ships[0]["rarity"], "超稀有")
 
     def test_xlsx_roundtrip(self):
         rows = [
@@ -77,6 +292,172 @@ class AppTests(unittest.TestCase):
             self.assertEqual(skipped, 1)
             self.assertEqual(report_rows[0]["处理状态"], "处理完成")
             self.assertEqual(report_rows[1]["处理状态"], "未匹配到数据跳过")
+
+    def test_ship_filter_sort_and_status_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.DATA_DIR = Path(temp_dir)
+            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                ship_1 = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 0,
+                            }
+                        ],
+                    },
+                )
+                ship_2 = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {
+                                "stage": "达到120级",
+                                "attribute": "重巡/轻巡 机动",
+                                "points": 0,
+                            }
+                        ],
+                    },
+                )
+
+            ships = app.list_ships({"is_trained": "否"})
+            self.assertEqual([ship["name"] for ship in ships], ["古鹰", "武藏"])
+            ships = app.list_ships({"tech_attribute": "机动"})
+            self.assertEqual([ship["name"] for ship in ships], ["古鹰"])
+
+            updated = app.update_ship_status(ship_1["id"], "is_idling", True)
+            self.assertTrue(updated["is_idling"])
+            self.assertIsNone(updated["is_trained"])
+
+    def test_partial_sync_matches_and_overwrites(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.DATA_DIR = Path(temp_dir)
+            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "旧类型",
+                        "rarity": "旧稀有度",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "旧加成",
+                                "points": 0,
+                            }
+                        ],
+                    },
+                )
+            release_entry = {"name": "武藏", "release_date": "2023-08-17"}
+            parsed_ship = {
+                "name": "武藏",
+                "release_date": "2023-08-17",
+                "ship_type": "战列",
+                "rarity": "海上传奇",
+                "tech_points": [
+                    {
+                        "stage": "解锁图鉴",
+                        "attribute": "战巡/战列/航战 耐久",
+                        "points": 0,
+                    }
+                ],
+            }
+            with patch(
+                "app.fetch_release_entries", return_value=[release_entry]
+            ), patch("app.fetch_ship_payload", return_value=parsed_ship):
+                app._sync_wiki(["武藏"])
+
+            self.assertEqual(app.SYNC_STATE["processed"], 1)
+            self.assertEqual(app.SYNC_STATE["errors"], [])
+            ships = app.list_ships({"name": "武藏"})
+            self.assertEqual(ships[0]["ship_type"], "战列")
+            self.assertEqual(ships[0]["tech_points"][0]["attribute"], "战巡/战列/航战 耐久")
+
+    def test_partial_sync_requires_wiki_match(self):
+        app.SYNC_STATE.update({"running": False, "status": "", "message": ""})
+        with patch(
+            "app.fetch_release_entries",
+            return_value=[{"name": "武藏", "release_date": "2023-08-17"}],
+        ):
+            app._sync_wiki(["古鹰"])
+        self.assertEqual(app.SYNC_STATE["status"], "失败")
+        self.assertIn("古鹰", app.SYNC_STATE["message"])
+
+    def test_delete_ship_removes_related_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.DATA_DIR = Path(temp_dir)
+            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 0,
+                            }
+                        ],
+                    },
+                )
+
+            self.assertTrue(app.delete_ship(ship["id"]))
+            self.assertEqual(app.list_ships({}), [])
+
+    def test_clear_ships_removes_all_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.DATA_DIR = Path(temp_dir)
+            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                for name, date, stage in [
+                    ("武藏", "2023-08-17", "解锁图鉴"),
+                    ("古鹰", "2017-05-25", "达到120级"),
+                ]:
+                    app.insert_ship(
+                        connection,
+                        name,
+                        date,
+                        {
+                            "ship_type": "战列",
+                            "rarity": "海上传奇",
+                            "tech_points": [
+                                {
+                                    "stage": stage,
+                                    "attribute": "战巡/战列/航战 耐久",
+                                    "points": 0,
+                                }
+                            ],
+                        },
+                    )
+
+            self.assertEqual(app.clear_ships(), 2)
+            self.assertEqual(app.list_ships({}), [])
+            with app.get_connection() as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM tech_points").fetchone()[0],
+                    0,
+                )
 
 
 if __name__ == "__main__":

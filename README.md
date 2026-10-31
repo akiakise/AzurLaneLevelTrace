@@ -19,7 +19,7 @@ SQLite 数据库
 - 后端框架：Python `http.server.ThreadingHTTPServer`，由 `app.py` 内的 `TrackerHandler` 统一处理路由。
 - 数据库：SQLite，默认位于 `DATA_DIR/blhx-training.sqlite3`。
 - 前端：内嵌在 `app.py` 的 HTML/CSS/JavaScript 页面，没有 Node.js 构建流程。
-- 外部数据源：碧蓝航线 Wiki 实装日期页与单舰 Wiki 页。
+- 外部数据源：碧蓝航线 Wiki 后端接口（MediaWiki revisions API 与 Semantic MediaWiki ask API）。
 - Excel：通过标准库 `zipfile` 和 `xml.etree.ElementTree` 读写 `.xlsx`，没有引入 `openpyxl`、`pandas` 等依赖。
 - 部署：单容器 Docker 部署，宿主机 `./data` 目录挂载到容器 `/data`。
 
@@ -60,9 +60,9 @@ SQLite 数据库
 | --- | --- |
 | `id` | 自增主键 |
 | `ship_id` | 关联 `ships.id` |
-| `stage` | 科技点阶段：解锁图鉴、突破至满星、达到120级 |
-| `attribute` | 对应属性，例如耐久、炮击、装填、命中、机动、雷击、防空、航空 |
-| `points` | 科技点数值 |
+| `stage` | 科技点阶段：解锁图鉴、达到120级 |
+| `attribute` | 对应属性加成描述，例如 `战巡/战列/航战 耐久` |
+| `points` | 保留字段，当前不再用于展示和筛选，固定为 `0` |
 
 一艘舰船可以有多条 `tech_points` 记录。若某舰船没有任何有效科技点，同步时会将 `needs_training` 写为 `否`；否则写为 `是`。
 
@@ -94,6 +94,10 @@ SQLite 数据库
 | `PORT` | `8000` | HTTP 服务端口 |
 | `WIKI_BASE_URL` | `https://wiki.biligame.com` | Wiki 站点地址 |
 | `WIKI_REQUEST_INTERVAL` | `0.12` | 相邻 Wiki 请求之间的等待秒数 |
+| `WIKI_CONCURRENCY` | `4` | 单舰 Wiki 页面并发请求数 |
+| `WIKI_RETRY_COUNT` | `4` | Wiki 请求失败后的最大尝试次数 |
+| `WIKI_RETRY_DELAY` | `1.5` | Wiki 请求重试的基础等待秒数，实际按指数退避 |
+| `LOG_LEVEL` | `INFO` | 日志级别，例如 `INFO`、`WARNING`、`ERROR` |
 | `USER_AGENT` | `BLHX-Training-Tracker/1.0` | 请求 Wiki 时的 UA |
 
 数据库路径由 `DATA_DIR` 派生为：
@@ -110,28 +114,29 @@ DATA_DIR/blhx-training.sqlite3
 
 数据来源：
 
-- 实装日期页：<https://wiki.biligame.com/blhx/%E5%AE%9E%E8%A3%85%E6%97%A5%E6%9C%9F>
-- 单舰页：由实装日期页中的 `/blhx/{舰船名称}` 链接推导。
+- MediaWiki revisions API：按舰娘标题读取 `{{舰娘图鉴}}` 原始模板内容。
+- Semantic MediaWiki ask API：按舰娘分类分页查询名称、编号和实装日期。
 
 同步逻辑：
 
-1. 请求实装日期页，解析表格中的舰船链接和实装日期。
-2. 从链接路径取 `/blhx/` 后面的片段并 URL 解码，作为数据库中的 `name`，避免假名或页面显示名影响主数据。
+1. 通过 `action=ask` 请求常规、联动、方案和 META 舰娘分类，并按实装日期升序分页读取。
+2. 使用接口返回的页面标题作为数据库中的 `name`，避免假名或页面显示名影响主数据。
 3. 如果数据库中已存在同名舰船，直接跳过。
-4. 对新舰船请求 `action=raw` 的 Wiki 源码。
-5. 解析舰种、稀有度和科技点相关字段。
+4. 对新舰船以 `WIKI_CONCURRENCY` 个线程并发请求 `action=query` 的 revision wikitext；全局仍按 `WIKI_REQUEST_INTERVAL` 控制请求节奏。
+5. 解析舰种、稀有度，以及解锁图鉴和达到120级对应的属性加成。
 6. 将舰船与多条科技点记录写入 SQLite。
 7. `is_idling`、`is_trained` 初始为空，留给 Excel 导入或后续功能更新。
 
 科技点解析自以下 Wiki 字段：
 
-- `解锁图鉴科技点`
-- `突破至满星科技点`
-- `达到120级科技点`
 - `解锁图鉴属性加成`
 - `达到120级属性加成`
 
-同步是异步执行的，前端通过 `/api/sync/status` 轮询进度。
+突破至满星科技点不解析；启动时会清理历史数据中的对应记录。
+
+同步是异步执行的，前端通过 `/api/sync/status` 轮询进度，并在弹窗中实时展示总进度、新增、跳过和错误数量。同步期间页面会被 loading 遮罩锁定。
+
+少量同步复用上述抓取和解析流程。点击“少量同步”后输入一个或多个舰娘名称；同步前会通过 Wiki 后端接口精确匹配名称，因此也支持数据库中尚不存在的舰娘。匹配成功后只同步这些舰娘，并覆盖对应的 Wiki 字段和科技点加成。
 
 ### 2. Excel 批量导入
 
@@ -217,7 +222,7 @@ GET /api/ships
 | `name` | 舰船名称模糊查询 |
 | `ship_type` | 舰种精确匹配 |
 | `rarity` | 稀有度精确匹配 |
-| `tech_point` | 匹配科技点阶段或属性 |
+| `tech_attribute` | 匹配解锁图鉴或120级属性加成中的属性 |
 | `needs_training` | `是` / `否` |
 | `is_idling` | `是` / `否` |
 | `is_trained` | `是` / `否` |
@@ -240,8 +245,8 @@ GET /api/ships
       "tech_points": [
         {
           "stage": "解锁图鉴",
-          "attribute": "耐久",
-          "points": 26
+          "attribute": "战巡/战列/航战 耐久",
+          "points": 0
         }
       ]
     }
@@ -260,6 +265,54 @@ GET /api/ships
 | `GET` | `/api/sync/status` | 查询同步进度 |
 | `GET` | `/api/template` | 下载 Excel 导入模板 |
 | `POST` | `/api/import` | 上传 Excel 并返回处理结果 Excel |
+| `POST` | `/api/ship/status` | 更新单舰已挂机或已练级状态 |
+| `POST` | `/api/ship/delete` | 删除单舰及其科技点数据 |
+| `POST` | `/api/ships/clear` | 清空所有舰娘及其科技点数据 |
+
+Web 页面筛选：
+
+- 舰种、稀有度、科技属性和三个状态筛选均为平铺按钮，点选后立即重新查询。
+- 舰船名称输入后自动模糊查询。
+- 页面默认选中“已练级完成 = 否”。
+- 列表默认按实装日期升序排列。
+- 页面顶部提供“少量同步”按钮，点击后可输入一个或多个舰娘名称启动同步。
+- 页面顶部提供“全量同步”按钮，点击后需要通过网页内弹窗二次确认才会发起同步。
+- 页面顶部提供“清空数据”按钮；确认后删除全部舰娘及其科技点数据，同步进行中会拒绝清空。
+- 表格操作列提供状态完成按钮和删除按钮；状态未完成时显示对应完成按钮，删除前会通过网页内弹窗二次确认。
+
+`POST /api/sync` 请求体：
+
+全量同步：
+
+```json
+{}
+```
+
+少量同步：
+
+```json
+{
+  "ship_names": ["武藏", "古鹰"]
+}
+```
+
+`POST /api/ship/status` 请求体：
+
+```json
+{
+  "id": 1,
+  "field": "is_idling",
+  "value": true
+}
+```
+
+`POST /api/ship/delete` 请求体：
+
+```json
+{
+  "id": 1
+}
+```
 
 ## Docker 部署
 

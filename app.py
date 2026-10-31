@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
 import re
 import sqlite3
 import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -15,7 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, unquote, urlsplit
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
@@ -24,11 +28,21 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 DATABASE_PATH = DATA_DIR / "blhx-training.sqlite3"
 WIKI_BASE_URL = os.getenv("WIKI_BASE_URL", "https://wiki.biligame.com").rstrip("/")
+WIKI_API_PATH = "/blhx/api.php"
 WIKI_REQUEST_INTERVAL = float(os.getenv("WIKI_REQUEST_INTERVAL", "0.12"))
+WIKI_CONCURRENCY = max(1, int(os.getenv("WIKI_CONCURRENCY", "4")))
+WIKI_RETRY_COUNT = max(1, int(os.getenv("WIKI_RETRY_COUNT", "4")))
+WIKI_RETRY_DELAY = max(0.0, float(os.getenv("WIKI_RETRY_DELAY", "1.5")))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 USER_AGENT = os.getenv(
     "USER_AGENT",
-    "BLHX-Training-Tracker/1.0 (+https://github.com/)",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 )
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+LOGGER = logging.getLogger("blhx_training_tracker")
 
 RARITY_ORDER = {
     "海上传奇": 0,
@@ -60,9 +74,8 @@ DEFAULT_TECH_PRIORITY = [
 ]
 
 TECH_STAGE_FIELDS = {
-    "解锁图鉴": ("解锁图鉴科技点", "解锁图鉴属性加成"),
-    "突破至满星": ("突破至满星科技点", ""),
-    "达到120级": ("达到120级科技点", "达到120级属性加成"),
+    "解锁图鉴": "解锁图鉴属性加成",
+    "达到120级": "达到120级属性加成",
 }
 
 SYNC_STATE: dict[str, Any] = {
@@ -75,10 +88,16 @@ SYNC_STATE: dict[str, Any] = {
     "errors": [],
 }
 SYNC_LOCK = threading.Lock()
+WIKI_REQUEST_LOCK = threading.Lock()
+NEXT_WIKI_REQUEST_AT = 0.0
 
 
 def utc_now_text() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def clean_template_value(value: str) -> str:
+    return re.sub(r"\\?<!--.*?-->", "", value, flags=re.DOTALL).strip()
 
 
 @contextmanager
@@ -125,8 +144,20 @@ def init_db() -> None:
                 ON ships(ship_type, needs_training, is_idling, is_trained);
             CREATE INDEX IF NOT EXISTS idx_tech_points_ship
                 ON tech_points(ship_id);
+
+            DELETE FROM tech_points WHERE stage = '突破至满星';
             """
         )
+        for row in connection.execute(
+            "SELECT id, ship_type, rarity FROM ships"
+        ).fetchall():
+            ship_type = clean_template_value(row["ship_type"])
+            rarity = clean_template_value(row["rarity"])
+            if ship_type != row["ship_type"] or rarity != row["rarity"]:
+                connection.execute(
+                    "UPDATE ships SET ship_type = ?, rarity = ? WHERE id = ?",
+                    (ship_type, rarity, row["id"]),
+                )
 
 
 def ship_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -150,22 +181,46 @@ def status_text(value: bool | None) -> str:
     return "是" if value else "否"
 
 
+def acquire_wiki_request_slot() -> None:
+    global NEXT_WIKI_REQUEST_AT
+    current_time = time.monotonic()
+    with WIKI_REQUEST_LOCK:
+        wait_seconds = max(0.0, NEXT_WIKI_REQUEST_AT - current_time)
+        NEXT_WIKI_REQUEST_AT = max(current_time, NEXT_WIKI_REQUEST_AT) + WIKI_REQUEST_INTERVAL
+    if wait_seconds:
+        time.sleep(wait_seconds)
+
+
 def insert_ship(
     connection: sqlite3.Connection,
     name: str,
     release_date: str,
     parsed_ship: dict[str, Any],
+    overwrite: bool = False,
 ) -> sqlite3.Row:
     current_time = utc_now_text()
     wiki_url = f"{WIKI_BASE_URL}/blhx/{quote(name, safe='')}"
     needs_training = 1 if parsed_ship["tech_points"] else 0
-    connection.execute(
+    conflict_action = (
         """
+        UPDATE SET
+          ship_type = excluded.ship_type,
+          rarity = excluded.rarity,
+          release_date = excluded.release_date,
+          needs_training = excluded.needs_training,
+          wiki_url = excluded.wiki_url,
+          updated_at = excluded.updated_at
+        """
+        if overwrite
+        else "NOTHING"
+    )
+    connection.execute(
+        f"""
         INSERT INTO ships (
             name, ship_type, rarity, release_date, needs_training,
             is_idling, is_trained, wiki_url, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
-        ON CONFLICT(name) DO NOTHING
+        ON CONFLICT(name) DO {conflict_action}
         """,
         (
             name,
@@ -181,6 +236,8 @@ def insert_ship(
     ship = connection.execute(
         "SELECT * FROM ships WHERE name = ?", (name,)
     ).fetchone()
+    if overwrite:
+        connection.execute("DELETE FROM tech_points WHERE ship_id = ?", (ship["id"],))
     for tech_point in parsed_ship["tech_points"]:
         connection.execute(
             """
@@ -282,13 +339,8 @@ def parse_template_fields(raw_text: str) -> dict[str, str]:
             continue
         key, separator, value = line[1:].partition("=")
         if separator:
-            fields[key.strip()] = value.strip()
+            fields[key.strip()] = clean_template_value(value)
     return fields
-
-
-def integer_from_text(value: str) -> int | None:
-    match = re.search(r"\d+", value)
-    return int(match.group()) if match else None
 
 
 def attribute_from_text(value: str) -> str:
@@ -296,17 +348,19 @@ def attribute_from_text(value: str) -> str:
     return match.group(1) if match else ""
 
 
+def attribute_bonus_from_text(value: str) -> str:
+    return re.sub(r"\s*\+\s*\d+\s*$", "", value.strip())
+
+
 def parse_ship_raw(raw_text: str) -> dict[str, Any] | None:
     fields = parse_template_fields(raw_text)
     if not fields:
         return None
     tech_points: list[dict[str, Any]] = []
-    for stage, (points_key, attribute_key) in TECH_STAGE_FIELDS.items():
-        points = integer_from_text(fields.get(points_key, ""))
-        if points is None or points <= 0:
-            continue
-        attribute = attribute_from_text(fields.get(attribute_key, "")) if attribute_key else ""
-        tech_points.append({"stage": stage, "attribute": attribute, "points": points})
+    for stage, attribute_key in TECH_STAGE_FIELDS.items():
+        attribute = attribute_bonus_from_text(fields.get(attribute_key, ""))
+        if attribute:
+            tech_points.append({"stage": stage, "attribute": attribute, "points": 0})
     return {
         "ship_type": fields.get("类型", ""),
         "rarity": fields.get("稀有度", ""),
@@ -314,90 +368,337 @@ def parse_ship_raw(raw_text: str) -> dict[str, Any] | None:
     }
 
 
+def parse_wiki_challenge_cookie(body: str) -> str | None:
+    if "__tst_status" not in body or "EO_Bot_Ssid" not in body:
+        return None
+    object_match = re.search(
+        r"var\s+e\s*=\s*\{(.*?)\}\s*,\s*t\s*=\s*0\s*;", body, re.DOTALL
+    )
+    status_values = (
+        re.findall(r":\s*(\d+)\s*(?:[,}]|$)", object_match.group(1))
+        if object_match
+        else []
+    )
+    ssid_match = re.search(
+        r'EO_Bot_Ssid=";.*?\(\s*t,\s*(\d+)\s*\)', body, re.DOTALL
+    )
+    if len(status_values) < 3 or ssid_match is None:
+        return None
+    return (
+        f"__tst_status={sum(map(int, status_values[:3]))}#; "
+        f"EO_Bot_Ssid={ssid_match.group(1)}"
+    )
+
+
 def fetch_wiki_text(path: str) -> str:
     url = f"{WIKI_BASE_URL}{path}"
-    request = Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        },
-    )
-    with urlopen(request, timeout=25) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="replace")
+    last_error: Exception | None = None
+    challenge_cookie = ""
+    for attempt in range(WIKI_RETRY_COUNT):
+        acquire_wiki_request_slot()
+        headers = {
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": f"{WIKI_BASE_URL}/blhx/%E5%AE%9E%E8%A3%85%E6%97%A5%E6%9C%9F",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
+        }
+        if challenge_cookie:
+            headers["Cookie"] = challenge_cookie
+        request = Request(url, headers=headers)
+        try:
+            with urlopen(request, timeout=25) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                body = response.read().decode(charset, errors="replace")
+            if "__tst_status" in body and "EO_Bot_Ssid" in body:
+                parsed_cookie = parse_wiki_challenge_cookie(body)
+                if parsed_cookie and parsed_cookie != challenge_cookie:
+                    challenge_cookie = parsed_cookie
+                    LOGGER.warning("检测到 Wiki 防护校验，已生成 Cookie 并重试: %s", url)
+                    continue
+            return body
+        except HTTPError as error:
+            last_error = error
+            if error.code not in {403, 408, 429} and error.code < 500:
+                raise
+            error.close()
+        except (URLError, TimeoutError, OSError) as error:
+            last_error = error
+        if attempt + 1 < WIKI_RETRY_COUNT:
+            delay = WIKI_RETRY_DELAY * (2**attempt) + random.uniform(0, 0.5)
+            LOGGER.warning(
+                "Wiki 请求失败，%.1f 秒后重试（第 %s/%s 次）: %s",
+                delay,
+                attempt + 1,
+                WIKI_RETRY_COUNT,
+                url,
+            )
+            time.sleep(delay)
+    assert last_error is not None
+    raise last_error
+
+
+def fetch_wiki_api(params: dict[str, Any]) -> dict[str, Any]:
+    path = f"{WIKI_API_PATH}?{urlencode(params)}"
+    body = fetch_wiki_text(path)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        LOGGER.error(
+            "解析 Wiki API 响应失败，原始返回（长度 %s）：%s\n%s",
+            len(body),
+            body,
+        )
+        raise ValueError("Wiki API 返回非 JSON 数据") from None
+    if not isinstance(payload, dict):
+        LOGGER.error("Wiki API 响应结构异常，原始返回：%s", body)
+        raise ValueError("Wiki API 响应结构异常")
+    if payload.get("error"):
+        LOGGER.error("Wiki API 请求失败，原始返回：%s", body)
+        raise ValueError(payload["error"].get("info", "Wiki API 请求失败"))
+    return payload
 
 
 def fetch_release_entries() -> list[dict[str, str]]:
-    html_text = fetch_wiki_text("/blhx/%E5%AE%9E%E8%A3%85%E6%97%A5%E6%9C%9F")
-    return extract_ship_entries(html_text)
+    entries_by_name: dict[str, dict[str, str]] = {}
+    offset = 0
+    while True:
+        query = (
+            "[[分类:舰娘]] OR [[分类:联动舰娘]] OR [[分类:方案舰娘]] "
+            "OR [[分类:META舰娘]]|?实装日期|?编号"
+            f"|sort=实装日期|order=asc|limit=500|offset={offset}"
+        )
+        payload = fetch_wiki_api(
+            {
+                "action": "ask",
+                "query": query,
+                "format": "json",
+                "formatversion": "2",
+            }
+        )
+        results = payload.get("query", {}).get("results", {})
+        if not isinstance(results, dict):
+            LOGGER.error("Wiki API 舰娘列表响应结构异常，原始返回：%s", payload)
+            raise ValueError("Wiki API 舰娘列表响应结构异常")
+        for result in results.values():
+            ship_name = str(result.get("fulltext", "")).strip()
+            date_values = result.get("printouts", {}).get("实装日期", [])
+            date_text = str(date_values[0]).strip() if date_values else ""
+            date_match = re.fullmatch(
+                r"(\d{4})年(\d{1,2})月(?:(\d{1,2})日)?", date_text
+            )
+            if not ship_name or date_match is None:
+                LOGGER.warning(
+                    "Wiki API 舰娘缺少有效实装日期，已跳过: %s（%s）",
+                    ship_name or "未知名称",
+                    date_text,
+                )
+                continue
+            year, month, day = date_match.groups()
+            entries_by_name[ship_name] = {
+                "name": ship_name,
+                "release_date": f"{year}-{int(month):02d}-{int(day or 1):02d}",
+            }
+        offset = payload.get("query-continue-offset")
+        if not offset:
+            break
+    return list(entries_by_name.values())
 
 
 def fetch_ship_raw(ship_name: str) -> str:
-    encoded_name = quote(ship_name, safe="")
-    return fetch_wiki_text(f"/blhx/index.php?title={encoded_name}&action=raw")
+    payload = fetch_wiki_api(
+        {
+            "action": "query",
+            "titles": ship_name,
+            "prop": "revisions",
+            "rvprop": "content",
+            "rvslots": "main",
+            "redirects": "1",
+            "format": "json",
+            "formatversion": "2",
+        }
+    )
+    pages = payload.get("query", {}).get("pages", [])
+    if not isinstance(pages, list) or not pages:
+        LOGGER.error("Wiki API 未返回舰娘页面，原始返回：%s", payload)
+        raise ValueError("Wiki API 未返回舰娘页面")
+    page = pages[0]
+    if page.get("missing"):
+        LOGGER.error("Wiki API 未找到舰娘页面，原始返回：%s", payload)
+        raise ValueError(f"Wiki API 未找到舰娘页面：{ship_name}")
+    raw_text = (
+        page.get("revisions", [{}])[0]
+        .get("slots", {})
+        .get("main", {})
+        .get("content", "")
+    )
+    if not raw_text:
+        LOGGER.error("Wiki API 未返回舰娘内容，原始返回：%s", payload)
+        raise ValueError(f"Wiki API 未返回舰娘内容：{ship_name}")
+    return raw_text
 
 
-def sync_wiki() -> None:
+def fetch_ship_payload(entry: dict[str, str]) -> dict[str, Any]:
+    raw_text = fetch_ship_raw(entry["name"])
+    parsed_ship = parse_ship_raw(raw_text)
+    if parsed_ship is None:
+        LOGGER.error(
+            "解析舰娘 Wiki 数据失败，原始返回（长度 %s）：%s\n%s",
+            len(raw_text),
+            entry["name"],
+            raw_text,
+        )
+        raise ValueError("未找到舰娘图鉴模板")
+    return {
+        "name": entry["name"],
+        "release_date": entry["release_date"],
+        **parsed_ship,
+    }
+
+
+def _begin_sync(target_names: list[str] | None = None) -> bool:
     with SYNC_LOCK:
         if SYNC_STATE["running"]:
-            return
+            return False
+        sync_label = "、".join(target_names or [])
         SYNC_STATE.update(
             {
                 "running": True,
                 "status": "同步中",
-                "message": "正在读取实装日期页面",
+                "message": f"正在匹配舰娘 {sync_label}" if target_names else "正在读取实装日期页面",
                 "total": 0,
                 "processed": 0,
                 "skipped": 0,
                 "errors": [],
             }
         )
+        return True
 
+
+def sync_wiki(target_names: list[str] | None = None) -> None:
+    if not _begin_sync(target_names):
+        return
+    _sync_wiki(target_names)
+
+
+def _sync_wiki(target_names: list[str] | None = None) -> None:
     try:
         entries = fetch_release_entries()
+        if target_names is not None:
+            entries_by_name = {entry["name"]: entry for entry in entries}
+            missing_names = [
+                target_name
+                for target_name in target_names
+                if target_name not in entries_by_name
+            ]
+            if missing_names:
+                raise ValueError(
+                    "Wiki 后端接口未找到舰娘：" + "、".join(missing_names)
+                )
+            entries = [entries_by_name[target_name] for target_name in target_names]
         SYNC_STATE["total"] = len(entries)
-        SYNC_STATE["message"] = "已读取实装日期页面"
         init_db()
         with get_connection() as connection:
             existing_names = {
                 row["name"]
                 for row in connection.execute("SELECT name FROM ships").fetchall()
             }
-            for entry in entries:
-                ship_name = entry["name"]
-                if ship_name in existing_names:
-                    SYNC_STATE["skipped"] += 1
-                    continue
-                try:
-                    raw_text = fetch_ship_raw(ship_name)
-                    parsed_ship = parse_ship_raw(raw_text)
-                    if parsed_ship is None:
-                        SYNC_STATE["errors"].append(f"{ship_name}: 未找到舰娘图鉴模板")
-                        continue
-                    insert_ship(connection, ship_name, entry["release_date"], parsed_ship)
-                    existing_names.add(ship_name)
-                    SYNC_STATE["processed"] += 1
-                except Exception as error:
-                    SYNC_STATE["errors"].append(f"{ship_name}: {error}")
-                finally:
-                    time.sleep(WIKI_REQUEST_INTERVAL)
+            if target_names is not None:
+                pending_entries = entries
+                SYNC_STATE["skipped"] = 0
+                SYNC_STATE["message"] = (
+                    f"已匹配 {len(target_names)} 个舰娘，正在同步 Wiki 数据"
+                )
+            else:
+                pending_entries = [
+                    entry for entry in entries if entry["name"] not in existing_names
+                ]
+                SYNC_STATE["skipped"] = len(entries) - len(pending_entries)
+                SYNC_STATE["message"] = (
+                    f"已读取实装日期页面，并发查询 {len(pending_entries)} 艘新舰船"
+                    if pending_entries
+                    else "没有需要新增的舰船"
+                )
+
+            with ThreadPoolExecutor(max_workers=WIKI_CONCURRENCY) as executor:
+                futures = {
+                    executor.submit(fetch_ship_payload, entry): entry
+                    for entry in pending_entries
+                }
+                for future in as_completed(futures):
+                    entry = futures[future]
+                    ship_name = entry["name"]
+                    try:
+                        parsed_ship = future.result()
+                        insert_ship(
+                            connection,
+                            ship_name,
+                            entry["release_date"],
+                            parsed_ship,
+                            overwrite=target_names is not None,
+                        )
+                        existing_names.add(ship_name)
+                        SYNC_STATE["processed"] += 1
+                        SYNC_STATE["message"] = f"已同步 {ship_name}"
+                    except Exception as error:
+                        LOGGER.exception("处理单舰 Wiki 数据失败: %s", ship_name)
+                        SYNC_STATE["errors"].append(f"{ship_name}: {error}")
+                        SYNC_STATE["message"] = f"处理 {ship_name} 时出错"
         SYNC_STATE["status"] = "完成"
-        SYNC_STATE["message"] = "同步完成"
+        SYNC_STATE["message"] = (
+            f"{'、'.join(target_names)} 同步完成"
+            if target_names is not None
+            else "同步完成"
+        )
     except Exception as error:
+        LOGGER.exception("Wiki 同步失败")
         SYNC_STATE["status"] = "失败"
         SYNC_STATE["message"] = str(error)
     finally:
         SYNC_STATE["running"] = False
 
 
-def start_sync() -> bool:
-    with SYNC_LOCK:
-        if SYNC_STATE["running"]:
-            return False
-    threading.Thread(target=sync_wiki, daemon=True).start()
+def start_sync(ship_names: str | list[str] | None = None) -> bool:
+    if ship_names is None:
+        target_names = None
+    elif isinstance(ship_names, str):
+        target_names = [
+            name.strip()
+            for name in re.split(r"[,，;；\r\n]+", ship_names)
+            if name.strip()
+        ]
+    else:
+        target_names = [
+            name.strip() for name in ship_names if isinstance(name, str) and name.strip()
+        ]
+    if ship_names is not None and not target_names:
+        raise ValueError("请输入要同步的舰娘名称")
+    if not _begin_sync(target_names):
+        return False
+    threading.Thread(target=_sync_wiki, args=(target_names,), daemon=True).start()
     return True
+
+
+def delete_ship(ship_id: int) -> bool:
+    if ship_id <= 0:
+        raise ValueError("舰娘 ID 无效")
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM ships WHERE id = ?", (ship_id,)
+        )
+        return cursor.rowcount > 0
+
+
+def clear_ships() -> int:
+    if SYNC_STATE["running"]:
+        raise ValueError("同步正在进行中，请稍后再清空数据")
+    with get_connection() as connection:
+        cursor = connection.execute("DELETE FROM ships")
+        return cursor.rowcount
 
 
 def list_ships(filters: dict[str, str]) -> list[dict[str, Any]]:
@@ -426,23 +727,28 @@ def list_ships(filters: dict[str, str]) -> list[dict[str, Any]]:
             conditions.append("s.is_trained = 1")
         else:
             conditions.append("COALESCE(s.is_trained, 0) = 0")
-    if filters.get("tech_point"):
-        keyword = f"%{filters['tech_point']}%"
+    if filters.get("tech_attribute"):
+        keyword = f"%{filters['tech_attribute']}%"
         conditions.append(
             """
             EXISTS (
                 SELECT 1 FROM tech_points tp
                 WHERE tp.ship_id = s.id
-                  AND (tp.stage LIKE ? OR tp.attribute LIKE ?)
+                  AND tp.stage IN ('解锁图鉴', '达到120级')
+                  AND tp.attribute LIKE ?
             )
             """
         )
-        parameters.extend([keyword, keyword])
+        parameters.append(keyword)
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     with get_connection() as connection:
         rows = connection.execute(
-            f"SELECT s.* FROM ships s {where_clause} ORDER BY s.name COLLATE NOCASE",
+            f"""
+            SELECT s.* FROM ships s {where_clause}
+            ORDER BY CASE WHEN s.release_date = '' THEN 1 ELSE 0 END,
+                     s.release_date, s.name COLLATE NOCASE
+            """,
             parameters,
         ).fetchall()
         ships = [ship_row_to_dict(row) for row in rows]
@@ -475,7 +781,7 @@ def tech_priority_rank(ship: dict[str, Any]) -> int:
     )
     ranks = []
     for tech_point in ship["tech_points"]:
-        attribute = tech_point["attribute"] or "其他"
+        attribute = attribute_from_text(tech_point["attribute"]) or "其他"
         ranks.append(priority.index(attribute) if attribute in priority else len(priority))
     return min(ranks) if ranks else len(priority) + 1
 
@@ -500,6 +806,33 @@ def next_ship(mode: str, ship_type: str = "") -> dict[str, Any] | None:
         )
     )
     return candidates[0]
+
+
+def update_ship_status(
+    ship_id: int,
+    field: str,
+    value: bool,
+) -> dict[str, Any] | None:
+    if field not in {"is_idling", "is_trained"}:
+        raise ValueError("field 只支持 is_idling 或 is_trained")
+    if not isinstance(value, bool):
+        raise ValueError("value 必须是布尔值")
+    with get_connection() as connection:
+        connection.execute(
+            f"UPDATE ships SET {field} = ?, updated_at = ? WHERE id = ?",
+            (1 if value else 0, utc_now_text(), ship_id),
+        )
+        row = connection.execute(
+            "SELECT id, is_idling, is_trained FROM ships WHERE id = ?",
+            (ship_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "is_idling": None if row["is_idling"] is None else bool(row["is_idling"]),
+        "is_trained": None if row["is_trained"] is None else bool(row["is_trained"]),
+    }
 
 
 def column_index_from_ref(cell_ref: str) -> int:
@@ -857,6 +1190,8 @@ PAGE_HTML = r"""<!doctype html>
     :root { color-scheme: dark; --bg:#0f172a; --panel:#16213c; --panel2:#1e293b; --line:#2f3f5d; --text:#e6edf7; --muted:#9db0c9; --blue:#38bdf8; --green:#4ade80; --red:#f87171; }
     * { box-sizing:border-box; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; }
+    body.loading { overflow:hidden; cursor:progress; user-select:none; }
+    body.loading button:not(.sync-close), body.loading input, body.loading select { pointer-events:none; opacity:.6; }
     .container { max-width:1500px; margin:0 auto; padding:28px 24px 60px; }
     header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
     h1 { font-size:26px; margin:0; }
@@ -866,9 +1201,16 @@ PAGE_HTML = r"""<!doctype html>
     button:hover,.button:hover { border-color:var(--blue); color:var(--blue); }
     button.primary { background:#0891b2; border-color:#0891b2; color:white; }
     button.primary:hover { background:#06b6d4; color:white; }
+    button.danger { border-color:#7f1d1d; color:#fca5a5; }
+    button.danger:hover { background:#7f1d1d; border-color:#b91c1c; color:white; }
     .card { background:linear-gradient(180deg,var(--panel),#131d34); border:1px solid var(--line); border-radius:14px; padding:20px; box-shadow:0 8px 28px rgba(0,0,0,.18); }
-    .filters { display:grid; grid-template-columns:repeat(6,minmax(140px,1fr)); gap:12px; margin:18px 0; }
-    label { display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }
+    .name-search { max-width:420px; margin:18px 0 16px; }
+    .filter-groups { display:grid; gap:12px; margin-bottom:16px; }
+    .chip-group { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+    .chip-label { color:var(--muted); font-size:12px; min-width:92px; }
+    .chip { border:1px solid #35507a; background:var(--panel2); color:var(--text); padding:6px 12px; border-radius:999px; cursor:pointer; font-size:13px; transition:.2s; }
+    .chip:hover { border-color:var(--blue); color:var(--blue); }
+    .chip.selected { background:#0891b2; border-color:#0891b2; color:white; }
     input,select { width:100%; background:#0b1120; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:10px; font-size:14px; }
     input:focus,select:focus { outline:2px solid rgba(56,189,248,.25); border-color:var(--blue); }
     .status-line { min-height:20px; color:var(--muted); font-size:13px; }
@@ -886,21 +1228,117 @@ PAGE_HTML = r"""<!doctype html>
     .no { color:var(--red); font-weight:700; }
     .empty { color:var(--muted); }
     .actions { display:flex; gap:10px; margin-top:12px; }
-    @media (max-width:1100px) { .filters { grid-template-columns:repeat(3,minmax(130px,1fr)); } }
-    @media (max-width:680px) { .filters { grid-template-columns:1fr; } header { display:block; } .toolbar { margin-top:14px; } th,td { padding:9px 6px; } }
+    .row-actions { display:flex; flex-wrap:wrap; gap:6px; }
+    .row-actions button { padding:6px 10px; font-size:12px; white-space:nowrap; }
+    .modal-overlay { display:none; position:fixed; inset:0; z-index:90; align-items:center; justify-content:center; padding:20px; background:rgba(8,13,25,.78); backdrop-filter:blur(3px); }
+    .modal-overlay.active { display:flex; }
+    .modal { width:min(460px,92vw); background:linear-gradient(180deg,var(--panel),#131d34); border:1px solid var(--line); border-radius:14px; padding:22px; box-shadow:0 18px 48px rgba(0,0,0,.35); }
+    .modal h2 { font-size:19px; margin:0 0 16px; }
+    .modal-label { display:block; color:var(--muted); font-size:12px; margin-bottom:8px; }
+    .modal textarea { width:100%; min-height:120px; background:#0b1120; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:10px; font-size:14px; resize:vertical; font-family:inherit; line-height:1.5; }
+    .modal-message { color:var(--text); font-size:14px; line-height:1.6; margin:0; }
+    .modal-error { color:var(--red); font-size:12px; margin-top:10px; }
+    .modal-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+    .sync-overlay { display:none; position:fixed; inset:0; z-index:100; align-items:center; justify-content:center; padding:20px; background:rgba(8,13,25,.76); backdrop-filter:blur(3px); }
+    .sync-overlay.active { display:flex; }
+    .sync-modal { width:min(520px,92vw); background:linear-gradient(180deg,var(--panel),#131d34); border:1px solid var(--line); border-radius:14px; padding:24px; box-shadow:0 18px 48px rgba(0,0,0,.35); }
+    .sync-title-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+    .sync-title-row h2 { font-size:19px; margin:0; }
+    .spinner { width:18px; height:18px; border:2px solid rgba(56,189,248,.25); border-top-color:var(--blue); border-radius:50%; animation:spin .8s linear infinite; }
+    .spinner[hidden] { display:none; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .progress-head { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin:18px 0 8px; }
+    .progress-track { height:8px; background:#0b1120; border-radius:999px; overflow:hidden; }
+    .progress-fill { width:0%; height:100%; background:linear-gradient(90deg,#0891b2,#38bdf8); transition:width .3s ease; }
+    .sync-count { margin-top:8px; color:var(--muted); font-size:13px; text-align:right; }
+    .sync-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:16px; }
+    .sync-stat { background:#0b1120; border:1px solid var(--line); border-radius:8px; padding:10px; }
+    .sync-stat-label { color:var(--muted); font-size:11px; margin-bottom:4px; }
+    .sync-stat-value { font-size:17px; font-weight:700; }
+    .sync-errors { max-height:130px; overflow:auto; margin:14px 0 0; padding-left:18px; color:var(--red); font-size:12px; line-height:1.6; }
+    .sync-close { display:block; width:100%; margin-top:20px; }
+    @media (max-width:680px) { header { display:block; } .toolbar { margin-top:14px; } .chip-label { min-width:100%; } th,td { padding:9px 6px; } .sync-stats { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
+  <div id="syncOverlay" class="sync-overlay">
+    <div class="sync-modal" role="dialog" aria-modal="true" aria-labelledby="syncTitle" aria-live="polite">
+      <div class="sync-title-row">
+        <h2 id="syncTitle">同步进度</h2>
+        <div id="syncSpinner" class="spinner" hidden></div>
+      </div>
+      <div id="syncMessage" class="status-line"></div>
+      <div class="progress-head"><span>进度</span><span id="syncPercent">0%</span></div>
+      <div class="progress-track"><div id="syncProgressBar" class="progress-fill"></div></div>
+      <div id="syncCount" class="sync-count">0 / 0</div>
+      <div class="sync-stats">
+        <div class="sync-stat"><div class="sync-stat-label">新增</div><div id="syncProcessed" class="sync-stat-value">0</div></div>
+        <div class="sync-stat"><div class="sync-stat-label">跳过</div><div id="syncSkipped" class="sync-stat-value">0</div></div>
+        <div class="sync-stat"><div class="sync-stat-label">错误</div><div id="syncErrorCount" class="sync-stat-value">0</div></div>
+      </div>
+      <ul id="syncErrors" class="sync-errors" hidden></ul>
+      <button id="syncClose" class="sync-close" disabled onclick="closeSyncOverlay()">关闭</button>
+    </div>
+  </div>
+
+  <div id="bulkSyncModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulkSyncTitle">
+      <h2 id="bulkSyncTitle">少量同步</h2>
+      <label class="modal-label" for="bulkSyncNames">舰娘名称（多个名称用逗号、分号或换行分隔）</label>
+      <textarea id="bulkSyncNames" rows="5" placeholder="例如：武藏，古鹰&#10;U-552"></textarea>
+      <div id="bulkSyncError" class="modal-error" hidden></div>
+      <div class="modal-footer">
+        <button type="button" onclick="closeBulkSyncModal()">取消</button>
+        <button type="button" class="primary" onclick="submitBulkSync()">发起同步</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="fullSyncConfirmModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fullSyncConfirmTitle">
+      <h2 id="fullSyncConfirmTitle">全量同步确认</h2>
+      <p class="modal-message">将请求 Wiki 后端接口并同步所有舰娘，确认发起全量同步？</p>
+      <div class="modal-footer">
+        <button type="button" onclick="cancelFullSync()">取消</button>
+        <button type="button" class="primary" onclick="confirmFullSync()">确认同步</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="deleteConfirmModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="deleteConfirmTitle">
+      <h2 id="deleteConfirmTitle">删除确认</h2>
+      <p id="deleteConfirmMessage" class="modal-message"></p>
+      <div class="modal-footer">
+        <button type="button" onclick="cancelDeleteShip()">取消</button>
+        <button type="button" class="danger" onclick="confirmDeleteShip()">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="clearConfirmModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clearConfirmTitle">
+      <h2 id="clearConfirmTitle">清空数据确认</h2>
+      <p class="modal-message">将删除数据库中所有舰娘及其科技点数据，此操作不可恢复。</p>
+      <div class="modal-footer">
+        <button type="button" onclick="cancelClearShips()">取消</button>
+        <button type="button" class="danger" onclick="confirmClearShips()">确认清空</button>
+      </div>
+    </div>
+  </div>
+
   <div class="container">
     <header>
       <div>
         <h1>碧蓝航线练级数据记录</h1>
-        <div class="subtitle">Wiki 同步 · Excel 导入 · 挂机与练级排序</div>
+        <div class="subtitle">全量同步 · Excel 导入 · 挂机与练级排序</div>
       </div>
       <div class="toolbar">
-        <button class="primary" onclick="startSync()">Wiki 同步</button>
+        <button id="syncButton" class="primary" onclick="requestFullSync()">全量同步</button>
+        <button id="partialSyncButton" onclick="startBulkSync()">少量同步</button>
         <a class="button" href="/api/template">下载导入模板</a>
         <button onclick="document.getElementById('importFile').click()">导入 Excel</button>
+        <button id="clearDataButton" class="danger" onclick="requestClearShips()">清空数据</button>
         <input id="importFile" type="file" accept=".xlsx" style="display:none" onchange="importExcel(this)">
       </div>
     </header>
@@ -915,26 +1353,32 @@ PAGE_HTML = r"""<!doctype html>
     </div>
 
     <div class="card">
-      <div class="filters">
-        <div><label>舰船名称</label><input id="fName" placeholder="名称关键字"></div>
-        <div><label>舰种</label><select id="fType"><option value="">全部</option></select></div>
-        <div><label>稀有度</label><select id="fRarity"><option value="">全部</option></select></div>
-        <div><label>科技点 / 属性</label><input id="fTech" placeholder="如：耐久、解锁图鉴"></div>
-        <div><label>是否需要练级</label><select id="fNeed"><option value="">全部</option><option>是</option><option>否</option></select></div>
-        <div><label>是否已挂机</label><select id="fIdle"><option value="">全部</option><option>是</option><option>否</option></select></div>
-        <div><label>是否已练级完成</label><select id="fTrained"><option value="">全部</option><option>是</option><option>否</option></select></div>
-        <div style="align-items:end;display:flex;gap:8px;"><button class="primary" onclick="loadShips()">查询</button><button onclick="resetFilters()">重置</button></div>
+      <div class="name-search">
+        <input id="fName" placeholder="输入名称关键字，自动模糊查询">
       </div>
+      <div id="filterGroups" class="filter-groups"></div>
       <div id="message" class="status-line"></div>
       <table>
-        <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>科技点</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>是否已练级完成</th></tr></thead>
-        <tbody id="shipTable"><tr><td colspan="8" class="empty">加载中...</td></tr></tbody>
+        <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>是否已练级完成</th><th>操作</th></tr></thead>
+        <tbody id="shipTable"><tr><td colspan="10" class="empty">加载中...</td></tr></tbody>
       </table>
     </div>
   </div>
 
   <script>
     let shipData = [];
+    let filterOptions = { shipTypes: [], rarities: [] };
+    let nameSearchTimer = null;
+    const techAttributes = ['装填', '命中', '炮击', '防空', '耐久', '航空', '雷击', '机动'];
+    const filterState = {
+      name: '',
+      ship_type: '',
+      rarity: '',
+      tech_attribute: '',
+      needs_training: '',
+      is_idling: '',
+      is_trained: '否'
+    };
     const escapeHtml = value => {
       const div = document.createElement('div');
       div.textContent = value;
@@ -958,13 +1402,7 @@ PAGE_HTML = r"""<!doctype html>
 
     async function loadShips() {
       const params = new URLSearchParams({
-        name: document.getElementById('fName').value.trim(),
-        ship_type: document.getElementById('fType').value,
-        rarity: document.getElementById('fRarity').value,
-        tech_point: document.getElementById('fTech').value.trim(),
-        needs_training: document.getElementById('fNeed').value,
-        is_idling: document.getElementById('fIdle').value,
-        is_trained: document.getElementById('fTrained').value
+        ...filterState
       });
       try {
         const result = await requestJson('/api/ships?' + params.toString());
@@ -979,22 +1417,33 @@ PAGE_HTML = r"""<!doctype html>
     function renderShips() {
       const tbody = document.getElementById('shipTable');
       if (!shipData.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty">没有匹配的数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="empty">没有匹配的数据</td></tr>';
         return;
       }
       tbody.innerHTML = shipData.map(ship => {
-        const tech = ship.tech_points.map(item =>
-          `<span class="tech">${escapeHtml(item.stage)}${item.attribute ? '｜' + escapeHtml(item.attribute) : ''}｜+${escapeHtml(item.points)}</span>`
-        ).join('') || '<span class="empty">无</span>';
+        const stageTech = stage => ship.tech_points
+          .filter(item => item.stage === stage)
+          .map(item => item.attribute)
+          .join('、') || '无';
+        const actionButtons = [];
+        actionButtons.push(`<button type="button" class="danger" data-delete data-id="${escapeHtml(ship.id)}" data-name="${escapeHtml(ship.name)}">删除</button>`);
+        if (ship.is_idling !== true) {
+          actionButtons.push(`<button type="button" data-action="is_idling" data-id="${escapeHtml(ship.id)}">已挂机完成</button>`);
+        }
+        if (ship.is_trained !== true) {
+          actionButtons.push(`<button type="button" data-action="is_trained" data-id="${escapeHtml(ship.id)}">已练级完成</button>`);
+        }
         return `<tr>
           <td><a href="${escapeHtml(ship.wiki_url)}" target="_blank" style="color:#e6edf7;">${escapeHtml(ship.name)}</a></td>
           <td>${escapeHtml(ship.ship_type || '')}</td>
           <td>${escapeHtml(ship.rarity || '')}</td>
-          <td><div class="tech-list">${tech}</div></td>
+          <td>${escapeHtml(stageTech('解锁图鉴'))}</td>
+          <td>${escapeHtml(stageTech('达到120级'))}</td>
           <td>${escapeHtml(ship.release_date || '')}</td>
           <td class="${ship.needs_training ? 'yes' : 'empty'}">${ship.needs_training ? '是' : '否'}</td>
           <td class="${statusClass(ship.is_idling)}">${statusText(ship.is_idling)}</td>
           <td class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
+          <td><div class="row-actions">${actionButtons.join('')}</div></td>
         </tr>`;
       }).join('');
     }
@@ -1005,15 +1454,157 @@ PAGE_HTML = r"""<!doctype html>
         target.innerHTML = '<span class="empty">没有符合条件的数据</span>';
         return;
       }
-      const tech = ship.tech_points.map(item => `${item.stage}${item.attribute ? '｜' + item.attribute : ''}｜+${item.points}`).join('、');
+      const tech = ship.tech_points
+        .filter(item => item.stage === '解锁图鉴' || item.stage === '达到120级')
+        .map(item => `${item.stage}${item.attribute ? '｜' + item.attribute : ''}`)
+        .join('、');
       target.innerHTML = `
         <div class="ship-name">${escapeHtml(ship.name)}</div>
         <div class="ship-meta">${escapeHtml(ship.ship_type || '')} · ${escapeHtml(ship.rarity || '')} · ${escapeHtml(tech || '无科技点')}</div>`;
     }
 
+    function renderFilters() {
+      const groups = [
+        { key: 'ship_type', label: '舰种', options: ['', ...filterOptions.shipTypes] },
+        { key: 'rarity', label: '稀有度', options: ['', ...filterOptions.rarities] },
+        { key: 'tech_attribute', label: '科技属性', options: ['', ...techAttributes] },
+        { key: 'needs_training', label: '需要练级', options: ['', '是', '否'] },
+        { key: 'is_idling', label: '已挂机', options: ['', '是', '否'] },
+        { key: 'is_trained', label: '已练级完成', options: ['', '是', '否'] }
+      ];
+      document.getElementById('filterGroups').innerHTML = groups.map(group => `
+        <div class="chip-group">
+          <span class="chip-label">${escapeHtml(group.label)}</span>
+          ${group.options.map(option => `
+            <button type="button"
+              class="chip ${filterState[group.key] === option ? 'selected' : ''}"
+              data-group="${escapeHtml(group.key)}"
+              data-value="${escapeHtml(option)}"
+            >${escapeHtml(option || '全部')}</button>
+          `).join('')}
+        </div>
+      `).join('');
+    }
+
+    async function completeShipStatus(shipId, field) {
+      try {
+        await requestJson('/api/ship/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: shipId, field, value: true })
+        });
+        showMessage('状态已更新');
+        await loadShips();
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    async function deleteShip(shipId, shipName) {
+      try {
+        await requestJson('/api/ship/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: shipId })
+        });
+        showMessage(`已删除 ${shipName}`);
+        await loadShips();
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    let pendingDeleteShip = null;
+
+    function requestDeleteShip(shipId, shipName) {
+      pendingDeleteShip = { id: shipId, name: shipName };
+      document.getElementById('deleteConfirmMessage').textContent =
+        `确认删除舰娘「${shipName}」及其相关数据？`;
+      document.getElementById('deleteConfirmModal').classList.add('active');
+    }
+
+    function cancelDeleteShip() {
+      pendingDeleteShip = null;
+      document.getElementById('deleteConfirmModal').classList.remove('active');
+    }
+
+    async function confirmDeleteShip() {
+      if (!pendingDeleteShip) return;
+      await deleteShip(pendingDeleteShip.id, pendingDeleteShip.name);
+      cancelDeleteShip();
+    }
+
+    function requestClearShips() {
+      document.getElementById('clearConfirmModal').classList.add('active');
+    }
+
+    function cancelClearShips() {
+      document.getElementById('clearConfirmModal').classList.remove('active');
+    }
+
+    async function confirmClearShips() {
+      try {
+        const result = await requestJson('/api/ships/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        cancelClearShips();
+        showMessage(`已清空 ${result.count} 个舰娘`);
+        await loadShips();
+      } catch (error) {
+        cancelClearShips();
+        showMessage(error.message, true);
+      }
+    }
+
+    function parseSyncNames(text) {
+      return [...new Set(
+        String(text || '')
+          .split(/[,，;；\r\n]+/)
+          .map(name => name.trim())
+          .filter(Boolean)
+      )];
+    }
+
+    function startBulkSync() {
+      document.getElementById('bulkSyncNames').value = '';
+      document.getElementById('bulkSyncError').hidden = true;
+      document.getElementById('bulkSyncModal').classList.add('active');
+      document.getElementById('bulkSyncNames').focus();
+    }
+
+    function closeBulkSyncModal() {
+      document.getElementById('bulkSyncModal').classList.remove('active');
+    }
+
+    function submitBulkSync() {
+      const names = parseSyncNames(document.getElementById('bulkSyncNames').value);
+      if (!names.length) {
+        document.getElementById('bulkSyncError').textContent = '请至少输入一个舰娘名称';
+        document.getElementById('bulkSyncError').hidden = false;
+        return;
+      }
+      closeBulkSyncModal();
+      startSync(names);
+    }
+
+    function requestFullSync() {
+      document.getElementById('fullSyncConfirmModal').classList.add('active');
+    }
+
+    function cancelFullSync() {
+      document.getElementById('fullSyncConfirmModal').classList.remove('active');
+    }
+
+    function confirmFullSync() {
+      cancelFullSync();
+      startSync();
+    }
+
     async function getNext(mode) {
       try {
-        const params = new URLSearchParams({ mode, ship_type: document.getElementById('fType').value });
+        const params = new URLSearchParams({ mode, ship_type: filterState.ship_type });
         const result = await requestJson('/api/next?' + params.toString());
         renderNext(result.ship);
         showMessage(result.ship ? '已获取推荐目标' : '没有符合条件的数据');
@@ -1025,23 +1616,86 @@ PAGE_HTML = r"""<!doctype html>
     async function refreshSyncStatus() {
       try {
         const result = await requestJson('/api/sync/status');
-        const errors = result.errors.length ? `；错误 ${result.errors.length} 条` : '';
-        showMessage(`${result.status}｜总数 ${result.total}｜新增 ${result.processed}｜跳过 ${result.skipped}${errors}`);
-        if (result.running) setTimeout(refreshSyncStatus, 1200);
-        if (!result.running && result.status === '完成') await loadShips();
+        updateSyncModal(result);
+        if (result.running) {
+          setTimeout(refreshSyncStatus, 1000);
+          return;
+        }
+        if (result.status === '完成') {
+          await loadShips();
+          if (!result.errors.length) setTimeout(() => closeSyncOverlay(), 2200);
+        }
       } catch (error) {
+        showMessage(error.message, true);
+        if (document.getElementById('syncOverlay').classList.contains('active')) {
+          setTimeout(refreshSyncStatus, 2000);
+        }
+      }
+    }
+
+    async function startSync(shipNames = null) {
+      try {
+        const targetNames = shipNames === null
+          ? null
+          : Array.isArray(shipNames)
+            ? shipNames.map(name => String(name).trim()).filter(Boolean)
+            : parseSyncNames(shipNames);
+        if (shipNames !== null && !targetNames.length) {
+          showMessage('请输入要同步的舰娘名称', true);
+          return;
+        }
+        showSyncOverlay();
+        document.body.classList.add('loading');
+        document.getElementById('syncButton').disabled = true;
+        await requestJson('/api/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(targetNames ? { ship_names: targetNames } : {})
+        });
+        showMessage(
+          targetNames
+            ? `已启动 ${targetNames.length} 个舰娘同步`
+            : '全量同步已启动'
+        );
+        refreshSyncStatus();
+      } catch (error) {
+        document.body.classList.remove('loading');
+        document.getElementById('syncButton').disabled = false;
+        document.getElementById('partialSyncButton').disabled = false;
+        closeSyncOverlay();
         showMessage(error.message, true);
       }
     }
 
-    async function startSync() {
-      try {
-        await requestJson('/api/sync', { method: 'POST' });
-        showMessage('同步已启动');
-        refreshSyncStatus();
-      } catch (error) {
-        showMessage(error.message, true);
-      }
+    function showSyncOverlay() {
+      document.getElementById('syncOverlay').classList.add('active');
+    }
+
+    function closeSyncOverlay() {
+      document.getElementById('syncOverlay').classList.remove('active');
+    }
+
+    function updateSyncModal(result) {
+      const completed = result.processed + result.skipped + result.errors.length;
+      const percent = result.total
+        ? Math.round(completed / result.total * 100)
+        : (result.status === '完成' ? 100 : 0);
+      const errors = result.errors.map(error => `<li>${escapeHtml(error)}</li>`).join('');
+      document.getElementById('syncMessage').textContent = result.message || result.status;
+      document.getElementById('syncPercent').textContent = `${percent}%`;
+      document.getElementById('syncProgressBar').style.width = `${percent}%`;
+      document.getElementById('syncCount').textContent = `${completed} / ${result.total}`;
+      document.getElementById('syncProcessed').textContent = result.processed;
+      document.getElementById('syncSkipped').textContent = result.skipped;
+      document.getElementById('syncErrorCount').textContent = result.errors.length;
+      document.getElementById('syncErrors').innerHTML = errors;
+      document.getElementById('syncErrors').hidden = !errors;
+      document.getElementById('syncSpinner').hidden = !result.running;
+      document.getElementById('syncClose').disabled = result.running;
+      document.getElementById('syncButton').disabled = result.running;
+      document.getElementById('partialSyncButton').disabled = result.running;
+      document.body.classList.toggle('loading', result.running);
+      if (result.running) showSyncOverlay();
     }
 
     async function importExcel(input) {
@@ -1071,20 +1725,51 @@ PAGE_HTML = r"""<!doctype html>
     }
 
     function resetFilters() {
-      ['fName','fTech'].forEach(id => document.getElementById(id).value = '');
-      ['fType','fRarity','fNeed','fIdle','fTrained'].forEach(id => document.getElementById(id).value = '');
+      filterState.name = '';
+      filterState.ship_type = '';
+      filterState.rarity = '';
+      filterState.tech_attribute = '';
+      filterState.needs_training = '';
+      filterState.is_idling = '';
+      filterState.is_trained = '否';
+      document.getElementById('fName').value = '';
+      renderFilters();
       loadShips();
     }
 
     async function initialize() {
       const ships = await requestJson('/api/ships');
-      const types = [...new Set(ships.ships.map(ship => ship.ship_type).filter(Boolean))].sort();
-      const rarities = [...new Set(ships.ships.map(ship => ship.rarity).filter(Boolean))];
-      document.getElementById('fType').innerHTML = '<option value="">全部</option>' + types.map(type => `<option>${escapeHtml(type)}</option>`).join('');
-      document.getElementById('fRarity').innerHTML = '<option value="">全部</option>' + rarities.map(rarity => `<option>${escapeHtml(rarity)}</option>`).join('');
+      filterOptions.shipTypes = [...new Set(ships.ships.map(ship => ship.ship_type).filter(Boolean))].sort();
+      filterOptions.rarities = [...new Set(ships.ships.map(ship => ship.rarity).filter(Boolean))];
+      renderFilters();
       await loadShips();
       refreshSyncStatus();
     }
+
+    document.getElementById('fName').addEventListener('input', event => {
+      filterState.name = event.target.value.trim();
+      clearTimeout(nameSearchTimer);
+      nameSearchTimer = setTimeout(loadShips, 300);
+    });
+
+    document.getElementById('filterGroups').addEventListener('click', event => {
+      const chip = event.target.closest('button.chip');
+      if (!chip) return;
+      filterState[chip.dataset.group] = chip.dataset.value;
+      renderFilters();
+      loadShips();
+    });
+
+    document.getElementById('shipTable').addEventListener('click', event => {
+      const deleteButton = event.target.closest('button[data-delete]');
+      if (deleteButton) {
+        requestDeleteShip(Number(deleteButton.dataset.id), deleteButton.dataset.name);
+        return;
+      }
+      const actionButton = event.target.closest('button[data-action]');
+      if (!actionButton) return;
+      completeShipStatus(Number(actionButton.dataset.id), actionButton.dataset.action);
+    });
 
     initialize().catch(error => showMessage(error.message, true));
   </script>
@@ -1132,13 +1817,22 @@ class TrackerHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         return self.rfile.read(length) if length else b""
 
+    def read_json(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.read_body().decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("请求体必须是有效的 JSON") from error
+        if not isinstance(payload, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+        return payload
+
     def query_filters(self) -> dict[str, str]:
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         keys = [
             "name",
             "ship_type",
             "rarity",
-            "tech_point",
+            "tech_attribute",
             "needs_training",
             "is_idling",
             "is_trained",
@@ -1181,14 +1875,18 @@ class TrackerHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error_json("Not Found", 404)
         except Exception as error:
+            LOGGER.exception("处理 GET 请求失败: %s", self.path)
             self.send_error_json(str(error), 500)
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         try:
             if path == "/api/sync":
-                self.read_body()
-                started = start_sync()
+                payload = self.read_json()
+                ship_names = payload.get("ship_names")
+                if ship_names is None and payload.get("ship_name") is not None:
+                    ship_names = [payload.get("ship_name")]
+                started = start_sync(ship_names)
                 if started:
                     self.send_json({"started": True})
                 else:
@@ -1207,9 +1905,32 @@ class TrackerHandler(BaseHTTPRequestHandler):
                     content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     filename="blhx-training-import-result.xlsx",
                 )
+            elif path == "/api/ship/status":
+                payload = self.read_json()
+                ship_id = int(payload.get("id", 0))
+                field = str(payload.get("field", ""))
+                updated_ship = update_ship_status(
+                    ship_id, field, payload.get("value", False)
+                )
+                if updated_ship is None:
+                    self.send_error_json("舰船不存在", 404)
+                    return
+                self.send_json({"ship": updated_ship})
+            elif path == "/api/ship/delete":
+                payload = self.read_json()
+                deleted = delete_ship(int(payload.get("id", 0)))
+                if not deleted:
+                    self.send_error_json("舰船不存在", 404)
+                    return
+                self.send_json({"deleted": True})
+            elif path == "/api/ships/clear":
+                self.read_json()
+                cleared_count = clear_ships()
+                self.send_json({"cleared": True, "count": cleared_count})
             else:
                 self.send_error_json("Not Found", 404)
         except Exception as error:
+            LOGGER.exception("处理 POST 请求失败: %s", self.path)
             self.send_error_json(str(error), 400)
 
 
