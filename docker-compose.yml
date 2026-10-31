@@ -1,0 +1,12 @@
+services:
+  blhx-training:
+    build: .
+    container_name: blhx-training
+    ports:
+      - "8000:8000"
+    environment:
+      DATA_DIR: /data
+      WIKI_REQUEST_INTERVAL: "0.12"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
