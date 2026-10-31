@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>碧蓝航线练级数据记录</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0f172a; --panel:#16213c; --panel2:#1e293b; --line:#2f3f5d; --text:#e6edf7; --muted:#9db0c9; --blue:#38bdf8; --green:#4ade80; --red:#f87171; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; }
+    body.loading { overflow:hidden; cursor:progress; user-select:none; }
+    body.loading button:not(.sync-close), body.loading input, body.loading select { pointer-events:none; opacity:.6; }
+    .container { max-width:1500px; margin:0 auto; padding:28px 24px 60px; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
+    h1 { font-size:26px; margin:0; }
+    .subtitle { color:var(--muted); margin-top:6px; }
+    .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    button,.button { border:1px solid #35507a; background:var(--panel2); color:var(--text); padding:10px 16px; border-radius:8px; cursor:pointer; text-decoration:none; font-size:14px; transition:.2s; }
+    button:hover,.button:hover { border-color:var(--blue); color:var(--blue); }
+    button.primary { background:#0891b2; border-color:#0891b2; color:white; }
+    button.primary:hover { background:#06b6d4; color:white; }
+    button.danger { border-color:#7f1d1d; color:#fca5a5; }
+    button.danger:hover { background:#7f1d1d; border-color:#b91c1c; color:white; }
+    .card { background:linear-gradient(180deg,var(--panel),#131d34); border:1px solid var(--line); border-radius:14px; padding:20px; box-shadow:0 8px 28px rgba(0,0,0,.18); }
+    .name-search { max-width:420px; margin:18px 0 16px; }
+    .filter-groups { display:grid; gap:12px; margin-bottom:16px; }
+    .chip-group { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+    .chip-label { color:var(--muted); font-size:12px; min-width:92px; }
+    .chip { border:1px solid #35507a; background:var(--panel2); color:var(--text); padding:6px 12px; border-radius:999px; cursor:pointer; font-size:13px; transition:.2s; }
+    .chip:hover { border-color:var(--blue); color:var(--blue); }
+    .chip.selected { background:#0891b2; border-color:#0891b2; color:white; }
+    input,select { width:100%; background:#0b1120; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:10px; font-size:14px; }
+    input:focus,select:focus { outline:2px solid rgba(56,189,248,.25); border-color:var(--blue); }
+    .status-line { min-height:20px; color:var(--muted); font-size:13px; }
+    .next-card { margin-bottom:18px; }
+    .next-title { color:var(--muted); font-size:13px; margin-bottom:10px; }
+    .next-config { margin-bottom:18px; }
+    .next-head { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .next-table { width:100%; border-collapse:collapse; margin-top:4px; }
+    .next-table th, .next-table td { border-bottom:1px solid var(--line); padding:12px 10px; vertical-align:top; }
+    .next-table th { background:#172136; color:var(--muted); font-size:12px; }
+    .next-ship-name { font-size:17px; font-weight:700; }
+    .next-ship-meta { color:var(--muted); font-size:12px; margin:5px 0 10px; }
+    .next-ship-actions { display:flex; }
+    .next-ship-actions button { padding:6px 10px; font-size:12px; }
+    .history-modal { width:min(720px,96vw); }
+    .history-list { max-height:min(58vh,560px); overflow:auto; margin:0; padding:0; list-style:none; }
+    .history-item { border-bottom:1px solid var(--line); padding:12px 0; }
+    .history-time { color:var(--muted); font-size:12px; margin-bottom:5px; }
+    .history-message { line-height:1.5; }
+    .chip:disabled { color:#5b6b85; cursor:not-allowed; opacity:.55; }
+    .chip-count { color:var(--muted); font-size:12px; }
+    .chip.selected .chip-count { color:rgba(255,255,255,.76); }
+    .ship-name { font-size:21px; font-weight:700; }
+    .ship-meta { color:var(--muted); margin-top:6px; }
+    table { width:100%; border-collapse:collapse; margin-top:16px; }
+    th,td { padding:12px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:12px; white-space:nowrap; background:#172136; position:sticky; top:0; }
+    tr:hover td { background:rgba(56,189,248,.05); }
+    .tech-list { display:flex; flex-wrap:wrap; gap:6px; max-width:420px; }
+    .tech { background:#123049; border:1px solid #244b6b; color:#bae6fd; padding:3px 8px; border-radius:999px; font-size:12px; white-space:nowrap; }
+    .yes { color:var(--green); font-weight:700; }
+    .no { color:var(--red); font-weight:700; }
+    .empty { color:var(--muted); }
+    .actions { display:flex; gap:10px; margin-top:12px; }
+    .row-actions { display:flex; flex-wrap:wrap; gap:6px; }
+    .row-actions button { padding:6px 10px; font-size:12px; white-space:nowrap; }
+    .modal-overlay { display:none; position:fixed; inset:0; z-index:90; align-items:center; justify-content:center; padding:20px; background:rgba(8,13,25,.78); backdrop-filter:blur(3px); }
+    .modal-overlay.active { display:flex; }
+    .modal { width:min(460px,92vw); background:linear-gradient(180deg,var(--panel),#131d34); border:1px solid var(--line); border-radius:14px; padding:22px; box-shadow:0 18px 48px rgba(0,0,0,.35); }
+    .modal h2 { font-size:19px; margin:0 0 16px; }
+    .modal-label { display:block; color:var(--muted); font-size:12px; margin-bottom:8px; }
+    .modal textarea { width:100%; min-height:120px; background:#0b1120; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:10px; font-size:14px; resize:vertical; font-family:inherit; line-height:1.5; }
+    .modal-message { color:var(--text); font-size:14px; line-height:1.6; margin:0; }
+    .modal-error { color:var(--red); font-size:12px; margin-top:10px; }
+    .modal-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+    .sync-overlay { display:none; position:fixed; inset:0; z-index:100; align-items:center; justify-content:center; padding:20px; background:rgba(8,13,25,.76); backdrop-filter:blur(3px); }
+    .sync-overlay.active { display:flex; }
+    .sync-modal { width:min(520px,92vw); background:linear-gradient(180deg,var(--panel),#131d34); border:1px solid var(--line); border-radius:14px; padding:24px; box-shadow:0 18px 48px rgba(0,0,0,.35); }
+    .sync-title-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+    .sync-title-row h2 { font-size:19px; margin:0; }
+    .spinner { width:18px; height:18px; border:2px solid rgba(56,189,248,.25); border-top-color:var(--blue); border-radius:50%; animation:spin .8s linear infinite; }
+    .spinner[hidden] { display:none; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .progress-head { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin:18px 0 8px; }
+    .progress-track { height:8px; background:#0b1120; border-radius:999px; overflow:hidden; }
+    .progress-fill { width:0%; height:100%; background:linear-gradient(90deg,#0891b2,#38bdf8); transition:width .3s ease; }
+    .sync-count { margin-top:8px; color:var(--muted); font-size:13px; text-align:right; }
+    .sync-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:16px; }
+    .sync-stat { background:#0b1120; border:1px solid var(--line); border-radius:8px; padding:10px; }
+    .sync-stat-label { color:var(--muted); font-size:11px; margin-bottom:4px; }
+    .sync-stat-value { font-size:17px; font-weight:700; }
+    .sync-errors { max-height:130px; overflow:auto; margin:14px 0 0; padding-left:18px; color:var(--red); font-size:12px; line-height:1.6; }
+    .sync-close { display:block; width:100%; margin-top:20px; }
+    @media (max-width:680px) { header { display:block; } .toolbar { margin-top:14px; } .chip-label { min-width:100%; } th,td { padding:9px 6px; } .sync-stats { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div id="syncOverlay" class="sync-overlay">
+    <div class="sync-modal" role="dialog" aria-modal="true" aria-labelledby="syncTitle" aria-live="polite">
+      <div class="sync-title-row">
+        <h2 id="syncTitle">同步进度</h2>
+        <div id="syncSpinner" class="spinner" hidden></div>
+      </div>
+      <div id="syncMessage" class="status-line"></div>
+      <div class="progress-head"><span>进度</span><span id="syncPercent">0%</span></div>
+      <div class="progress-track"><div id="syncProgressBar" class="progress-fill"></div></div>
+      <div id="syncCount" class="sync-count">0 / 0</div>
+      <div class="sync-stats">
+        <div class="sync-stat"><div class="sync-stat-label">新增</div><div id="syncProcessed" class="sync-stat-value">0</div></div>
+        <div class="sync-stat"><div class="sync-stat-label">跳过</div><div id="syncSkipped" class="sync-stat-value">0</div></div>
+        <div class="sync-stat"><div class="sync-stat-label">错误</div><div id="syncErrorCount" class="sync-stat-value">0</div></div>
+      </div>
+      <ul id="syncErrors" class="sync-errors" hidden></ul>
+      <button id="syncClose" class="sync-close" disabled onclick="closeSyncOverlay()">关闭</button>
+    </div>
+  </div>
+
+  <div id="bulkSyncModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulkSyncTitle">
+      <h2 id="bulkSyncTitle">少量同步</h2>
+      <label class="modal-label" for="bulkSyncNames">舰娘名称（多个名称用逗号、分号或换行分隔）</label>
+      <textarea id="bulkSyncNames" rows="5" placeholder="例如：武藏，古鹰&#10;U-552"></textarea>
+      <div id="bulkSyncError" class="modal-error" hidden></div>
+      <div class="modal-footer">
+        <button type="button" onclick="closeBulkSyncModal()">取消</button>
+        <button type="button" class="primary" onclick="submitBulkSync()">发起同步</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="fullSyncConfirmModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fullSyncConfirmTitle">
+      <h2 id="fullSyncConfirmTitle">全量同步确认</h2>
+      <p class="modal-message">将请求 Wiki 后端接口并同步所有舰娘，确认发起全量同步？</p>
+      <div class="modal-footer">
+        <button type="button" onclick="cancelFullSync()">取消</button>
+        <button type="button" class="primary" onclick="confirmFullSync()">确认同步</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="deleteConfirmModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="deleteConfirmTitle">
+      <h2 id="deleteConfirmTitle">删除确认</h2>
+      <p id="deleteConfirmMessage" class="modal-message"></p>
+      <div class="modal-footer">
+        <button type="button" onclick="cancelDeleteShip()">取消</button>
+        <button type="button" class="danger" onclick="confirmDeleteShip()">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="clearConfirmModal" class="modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clearConfirmTitle">
+      <h2 id="clearConfirmTitle">清空数据确认</h2>
+      <p class="modal-message">将删除数据库中所有舰娘及其科技点数据，此操作不可恢复。</p>
+      <div class="modal-footer">
+        <button type="button" onclick="cancelClearShips()">取消</button>
+        <button type="button" class="danger" onclick="confirmClearShips()">确认清空</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="historyModal" class="modal-overlay">
+    <div class="modal history-modal" role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+      <h2 id="historyTitle">操作历史</h2>
+      <ul id="historyList" class="history-list"><li class="history-item empty">加载中...</li></ul>
+      <div class="modal-footer">
+        <button type="button" onclick="closeHistoryModal()">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="container">
+    <header>
+      <div>
+        <h1>碧蓝航线练级数据记录</h1>
+        <div class="subtitle">全量同步 · Excel 导入 · 挂机与练级排序</div>
+      </div>
+      <div class="toolbar">
+        <button id="syncButton" class="primary" onclick="requestFullSync()">全量同步</button>
+        <button id="partialSyncButton" onclick="startBulkSync()">少量同步</button>
+        <a class="button" href="/api/template">下载导入模板</a>
+        <button onclick="document.getElementById('importFile').click()">导入 Excel</button>
+        <button onclick="openHistoryModal()">操作历史</button>
+        <button id="clearDataButton" class="danger" onclick="requestClearShips()">清空数据</button>
+        <input id="importFile" type="file" accept=".xlsx" style="display:none" onchange="importExcel(this)">
+      </div>
+    </header>
+
+    <div class="card next-card">
+      <div class="next-head">
+        <div class="next-title">推荐舰种配置</div>
+        <button id="confirmNextButton" class="primary" onclick="confirmNextTypes()">确认推荐</button>
+      </div>
+      <div id="nextTypeOptions" class="chip-group next-config"><span class="empty">加载中...</span></div>
+      <div class="next-title">推荐目标</div>
+      <div id="nextTargets"><span class="empty">请选择舰种并确认推荐</span></div>
+    </div>
+
+    <div class="card">
+      <div class="name-search">
+        <input id="fName" placeholder="输入名称关键字，自动模糊查询">
+      </div>
+      <div id="filterGroups" class="filter-groups"></div>
+      <div id="message" class="status-line"></div>
+      <table>
+        <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>是否已练级完成</th><th>操作</th></tr></thead>
+        <tbody id="shipTable"><tr><td colspan="10" class="empty">加载中...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    let shipData = [];
+    let filterOptions = { shipTypes: [], rarities: [] };
+    let nextOptions = [];
+    let nextTypeConfig = [];
+    let nextTargets = [];
+    let nameSearchTimer = null;
+    const techAttributes = ['装填', '命中', '炮击', '防空', '耐久', '航空', '雷击', '机动'];
+    const filterState = {
+      name: '',
+      ship_type: '',
+      rarity: '',
+      tech_attribute: '',
+      needs_training: '',
+      is_idling: '',
+      is_trained: '否'
+    };
+    const escapeHtml = value => {
+      const div = document.createElement('div');
+      div.textContent = value;
+      return div.innerHTML;
+    };
+    const statusClass = value => value === true ? 'yes' : value === false ? 'no' : 'empty';
+    const statusText = value => value === true ? '是' : value === false ? '否' : '';
+
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, options);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || response.statusText);
+      return result;
+    }
+
+    function showMessage(text, isError = false) {
+      const element = document.getElementById('message');
+      element.textContent = text || '';
+      element.style.color = isError ? '#f87171' : '#9db0c9';
+    }
+
+    async function loadShips() {
+      const params = new URLSearchParams({
+        ...filterState
+      });
+      try {
+        const result = await requestJson('/api/ships?' + params.toString());
+        shipData = result.ships;
+        renderShips();
+        showMessage(`共 ${shipData.length} 条记录`);
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    function renderShips() {
+      const tbody = document.getElementById('shipTable');
+      if (!shipData.length) {
+        tbody.innerHTML = '<tr><td colspan="10" class="empty">没有匹配的数据</td></tr>';
+        return;
+      }
+      tbody.innerHTML = shipData.map(ship => {
+        const stageTech = stage => ship.tech_points
+          .filter(item => item.stage === stage)
+          .map(item => item.attribute)
+          .join('、') || '无';
+        const actionButtons = [];
+        actionButtons.push(`<button type="button" class="danger" data-delete data-id="${escapeHtml(ship.id)}" data-name="${escapeHtml(ship.name)}">删除</button>`);
+        if (ship.is_idling !== true) {
+          actionButtons.push(`<button type="button" data-action="is_idling" data-id="${escapeHtml(ship.id)}">已挂机完成</button>`);
+        }
+        if (ship.is_trained !== true) {
+          actionButtons.push(`<button type="button" data-action="is_trained" data-id="${escapeHtml(ship.id)}">已练级完成</button>`);
+        }
+        return `<tr>
+          <td><a href="${escapeHtml(ship.wiki_url)}" target="_blank" style="color:#e6edf7;">${escapeHtml(ship.name)}</a></td>
+          <td>${escapeHtml(ship.ship_type || '')}</td>
+          <td>${escapeHtml(ship.rarity || '')}</td>
+          <td>${escapeHtml(stageTech('解锁图鉴'))}</td>
+          <td>${escapeHtml(stageTech('达到120级'))}</td>
+          <td>${escapeHtml(ship.release_date || '')}</td>
+          <td class="${ship.needs_training ? 'yes' : 'empty'}">${ship.needs_training ? '是' : '否'}</td>
+          <td class="${statusClass(ship.is_idling)}">${statusText(ship.is_idling)}</td>
+          <td class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
+          <td><div class="row-actions">${actionButtons.join('')}</div></td>
+        </tr>`;
+      }).join('');
+    }
+
+    function renderNextTypes() {
+      const target = document.getElementById('nextTypeOptions');
+      if (!nextOptions.length) {
+        target.innerHTML = '<span class="empty">没有可选舰种</span>';
+        return;
+      }
+      target.innerHTML = nextOptions.map(option => {
+        const selected = nextTypeConfig.includes(option.ship_type);
+        return `
+          <button type="button"
+            class="chip ${selected ? 'selected' : ''}"
+            data-next-type="${escapeHtml(option.ship_type)}"
+          >
+            ${escapeHtml(option.ship_type)}
+            <span class="chip-count">挂机${option.idle_count} / 练级${option.train_count}</span>
+          </button>`;
+      }).join('');
+    }
+
+    function recommendationTech(ship) {
+      return ship.tech_points
+        .filter(item => item.stage === '解锁图鉴' || item.stage === '达到120级')
+        .map(item => `${item.stage}${item.attribute ? '｜' + item.attribute : ''}`)
+        .join('、');
+    }
+
+    function recommendationCell(ship, field, label) {
+      if (!ship) {
+        return '<span class="empty">暂无可推荐舰娘</span>';
+      }
+      return `
+        <div class="next-ship-name">${escapeHtml(ship.name)}</div>
+        <div class="next-ship-meta">${escapeHtml(ship.rarity || '')} · ${escapeHtml(recommendationTech(ship) || '无科技点')}</div>
+        <div class="next-ship-actions">
+          <button type="button"
+            data-next-action="${escapeHtml(field)}"
+            data-id="${escapeHtml(ship.id)}"
+            data-name="${escapeHtml(ship.name)}"
+          >${escapeHtml(label)}</button>
+        </div>`;
+    }
+
+    function renderNextTargets() {
+      const target = document.getElementById('nextTargets');
+      if (!nextTargets.length) {
+        target.innerHTML = '<span class="empty">请选择舰种并确认推荐</span>';
+        return;
+      }
+      target.innerHTML = `
+        <table class="next-table">
+          <thead><tr><th>舰种</th><th>下一个挂机</th><th>下一个练级</th></tr></thead>
+          <tbody>
+            ${nextTargets.map(row => `
+              <tr>
+                <td>${escapeHtml(row.ship_type)}</td>
+                <td>${recommendationCell(row.idle, 'is_idling', '挂机完成')}</td>
+                <td>${recommendationCell(row.train, 'is_trained', '练级完成')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    function renderFilters() {
+      const groups = [
+        { key: 'ship_type', label: '舰种', options: ['', ...filterOptions.shipTypes] },
+        { key: 'rarity', label: '稀有度', options: ['', ...filterOptions.rarities] },
+        { key: 'tech_attribute', label: '科技属性', options: ['', ...techAttributes] },
+        { key: 'needs_training', label: '需要练级', options: ['', '是', '否'] },
+        { key: 'is_idling', label: '已挂机', options: ['', '是', '否'] },
+        { key: 'is_trained', label: '已练级完成', options: ['', '是', '否'] }
+      ];
+      document.getElementById('filterGroups').innerHTML = groups.map(group => `
+        <div class="chip-group">
+          <span class="chip-label">${escapeHtml(group.label)}</span>
+          ${group.options.map(option => `
+            <button type="button"
+              class="chip ${filterState[group.key] === option ? 'selected' : ''}"
+              data-group="${escapeHtml(group.key)}"
+              data-value="${escapeHtml(option)}"
+            >${escapeHtml(option || '全部')}</button>
+          `).join('')}
+        </div>
+      `).join('');
+    }
+
+    async function completeShipStatus(shipId, field) {
+      try {
+        await requestJson('/api/ship/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: shipId, field, value: true })
+        });
+        showMessage('状态已更新');
+        await loadShips();
+        await refreshNextOptions(true);
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    async function deleteShip(shipId, shipName) {
+      try {
+        await requestJson('/api/ship/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: shipId })
+        });
+        showMessage(`已删除 ${shipName}`);
+        await loadShips();
+        await refreshNextOptions(true);
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    let pendingDeleteShip = null;
+
+    function requestDeleteShip(shipId, shipName) {
+      pendingDeleteShip = { id: shipId, name: shipName };
+      document.getElementById('deleteConfirmMessage').textContent =
+        `确认删除舰娘「${shipName}」及其相关数据？`;
+      document.getElementById('deleteConfirmModal').classList.add('active');
+    }
+
+    function cancelDeleteShip() {
+      pendingDeleteShip = null;
+      document.getElementById('deleteConfirmModal').classList.remove('active');
+    }
+
+    async function confirmDeleteShip() {
+      if (!pendingDeleteShip) return;
+      await deleteShip(pendingDeleteShip.id, pendingDeleteShip.name);
+      cancelDeleteShip();
+    }
+
+    function requestClearShips() {
+      document.getElementById('clearConfirmModal').classList.add('active');
+    }
+
+    function cancelClearShips() {
+      document.getElementById('clearConfirmModal').classList.remove('active');
+    }
+
+    async function confirmClearShips() {
+      try {
+        const result = await requestJson('/api/ships/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        cancelClearShips();
+        showMessage(`已清空 ${result.count} 个舰娘`);
+        await loadShips();
+        await refreshNextOptions(true);
+      } catch (error) {
+        cancelClearShips();
+        showMessage(error.message, true);
+      }
+    }
+
+    function openHistoryModal() {
+      document.getElementById('historyModal').classList.add('active');
+      loadOperations();
+    }
+
+    function closeHistoryModal() {
+      document.getElementById('historyModal').classList.remove('active');
+    }
+
+    function formatOperationTime(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return escapeHtml(value || '');
+      const pad = number => String(number).padStart(2, '0');
+      const milliseconds = String(date.getMilliseconds()).padStart(3, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${milliseconds}`;
+    }
+
+    async function loadOperations() {
+      const target = document.getElementById('historyList');
+      try {
+        const result = await requestJson('/api/operations?limit=200');
+        if (!result.operations.length) {
+          target.innerHTML = '<li class="history-item empty">暂无操作记录</li>';
+          return;
+        }
+        target.innerHTML = result.operations.map(operation => `
+          <li class="history-item">
+            <div class="history-time">${formatOperationTime(operation.created_at)}</div>
+            <div class="history-message">${escapeHtml(operation.message)}</div>
+          </li>
+        `).join('');
+      } catch (error) {
+        target.innerHTML = `<li class="history-item empty">${escapeHtml(error.message)}</li>`;
+      }
+    }
+
+    function parseSyncNames(text) {
+      return [...new Set(
+        String(text || '')
+          .split(/[,，;；\r\n]+/)
+          .map(name => name.trim())
+          .filter(Boolean)
+      )];
+    }
+
+    function startBulkSync() {
+      document.getElementById('bulkSyncNames').value = '';
+      document.getElementById('bulkSyncError').hidden = true;
+      document.getElementById('bulkSyncModal').classList.add('active');
+      document.getElementById('bulkSyncNames').focus();
+    }
+
+    function closeBulkSyncModal() {
+      document.getElementById('bulkSyncModal').classList.remove('active');
+    }
+
+    function submitBulkSync() {
+      const names = parseSyncNames(document.getElementById('bulkSyncNames').value);
+      if (!names.length) {
+        document.getElementById('bulkSyncError').textContent = '请至少输入一个舰娘名称';
+        document.getElementById('bulkSyncError').hidden = false;
+        return;
+      }
+      closeBulkSyncModal();
+      startSync(names);
+    }
+
+    function requestFullSync() {
+      document.getElementById('fullSyncConfirmModal').classList.add('active');
+    }
+
+    function cancelFullSync() {
+      document.getElementById('fullSyncConfirmModal').classList.remove('active');
+    }
+
+    function confirmFullSync() {
+      cancelFullSync();
+      startSync();
+    }
+
+    async function loadNextTypeConfig() {
+      const result = await requestJson('/api/config');
+      nextTypeConfig = Array.isArray(result.next_ship_types)
+        ? result.next_ship_types
+        : [];
+    }
+
+    async function saveNextTypeConfig() {
+      const result = await requestJson('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ next_ship_types: nextTypeConfig })
+      });
+      nextTypeConfig = result.next_ship_types;
+    }
+
+    async function refreshNextOptions(loadTargets = false) {
+      const result = await requestJson('/api/next-options');
+      nextOptions = result.ship_types;
+      const availableTypes = nextOptions.map(option => option.ship_type);
+      const previousTypes = JSON.stringify(nextTypeConfig);
+      nextTypeConfig = nextTypeConfig.filter(type => availableTypes.includes(type));
+      if (JSON.stringify(nextTypeConfig) !== previousTypes) {
+        await saveNextTypeConfig();
+      }
+      renderNextTypes();
+      if (loadTargets) {
+        await loadNextTargets();
+      }
+    }
+
+    async function loadNextTargets() {
+      if (!nextTypeConfig.length) {
+        nextTargets = [];
+        renderNextTargets();
+        return;
+      }
+      const result = await requestJson('/api/next-group?' + nextTargetParams());
+      nextTargets = result.rows;
+      renderNextTargets();
+    }
+
+    function nextTargetParams() {
+      const params = new URLSearchParams();
+      nextTypeConfig.forEach(type => params.append('ship_types', type));
+      return params;
+    }
+
+    async function confirmNextTypes() {
+      if (!nextTypeConfig.length) {
+        showMessage('请至少选择一个推荐舰种', true);
+        return;
+      }
+      const button = document.getElementById('confirmNextButton');
+      button.disabled = true;
+      try {
+        await saveNextTypeConfig();
+        await loadNextTargets();
+        showMessage('已更新推荐结果');
+      } catch (error) {
+        showMessage(error.message, true);
+        await refreshNextOptions();
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function refreshSyncStatus() {
+      try {
+        const result = await requestJson('/api/sync/status');
+        updateSyncModal(result);
+        if (result.running) {
+          setTimeout(refreshSyncStatus, 1000);
+          return;
+        }
+        if (result.status === '完成') {
+          await loadShips();
+          await refreshNextOptions(true);
+          if (!result.errors.length) setTimeout(() => closeSyncOverlay(), 2200);
+        }
+      } catch (error) {
+        showMessage(error.message, true);
+        if (document.getElementById('syncOverlay').classList.contains('active')) {
+          setTimeout(refreshSyncStatus, 2000);
+        }
+      }
+    }
+
+    async function startSync(shipNames = null) {
+      try {
+        const targetNames = shipNames === null
+          ? null
+          : Array.isArray(shipNames)
+            ? shipNames.map(name => String(name).trim()).filter(Boolean)
+            : parseSyncNames(shipNames);
+        if (shipNames !== null && !targetNames.length) {
+          showMessage('请输入要同步的舰娘名称', true);
+          return;
+        }
+        showSyncOverlay();
+        document.body.classList.add('loading');
+        document.getElementById('syncButton').disabled = true;
+        await requestJson('/api/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(targetNames ? { ship_names: targetNames } : {})
+        });
+        showMessage(
+          targetNames
+            ? `已启动 ${targetNames.length} 个舰娘同步`
+            : '全量同步已启动'
+        );
+        refreshSyncStatus();
+      } catch (error) {
+        document.body.classList.remove('loading');
+        document.getElementById('syncButton').disabled = false;
+        document.getElementById('partialSyncButton').disabled = false;
+        closeSyncOverlay();
+        showMessage(error.message, true);
+      }
+    }
+
+    function showSyncOverlay() {
+      document.getElementById('syncOverlay').classList.add('active');
+    }
+
+    function closeSyncOverlay() {
+      document.getElementById('syncOverlay').classList.remove('active');
+    }
+
+    function updateSyncModal(result) {
+      const completed = result.processed + result.skipped + result.errors.length;
+      const percent = result.total
+        ? Math.round(completed / result.total * 100)
+        : (result.status === '完成' ? 100 : 0);
+      const errors = result.errors.map(error => `<li>${escapeHtml(error)}</li>`).join('');
+      document.getElementById('syncMessage').textContent = result.message || result.status;
+      document.getElementById('syncPercent').textContent = `${percent}%`;
+      document.getElementById('syncProgressBar').style.width = `${percent}%`;
+      document.getElementById('syncCount').textContent = `${completed} / ${result.total}`;
+      document.getElementById('syncProcessed').textContent = result.processed;
+      document.getElementById('syncSkipped').textContent = result.skipped;
+      document.getElementById('syncErrorCount').textContent = result.errors.length;
+      document.getElementById('syncErrors').innerHTML = errors;
+      document.getElementById('syncErrors').hidden = !errors;
+      document.getElementById('syncSpinner').hidden = !result.running;
+      document.getElementById('syncClose').disabled = result.running;
+      document.getElementById('syncButton').disabled = result.running;
+      document.getElementById('partialSyncButton').disabled = result.running;
+      document.body.classList.toggle('loading', result.running);
+      if (result.running) showSyncOverlay();
+    }
+
+    async function importExcel(input) {
+      const file = input.files[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const response = await fetch('/api/import', { method: 'POST', body: form });
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({}));
+          throw new Error(result.error || response.statusText);
+        }
+        const blob = await response.blob();
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = '导入处理结果.xlsx';
+        link.click();
+        URL.revokeObjectURL(link.href);
+        showMessage('Excel 处理完成，已下载处理结果');
+        await loadShips();
+        await refreshNextOptions(true);
+      } catch (error) {
+        showMessage(error.message, true);
+      } finally {
+        input.value = '';
+      }
+    }
+
+    function resetFilters() {
+      filterState.name = '';
+      filterState.ship_type = '';
+      filterState.rarity = '';
+      filterState.tech_attribute = '';
+      filterState.needs_training = '';
+      filterState.is_idling = '';
+      filterState.is_trained = '否';
+      document.getElementById('fName').value = '';
+      renderFilters();
+      loadShips();
+    }
+
+    async function initialize() {
+      const ships = await requestJson('/api/ships');
+      filterOptions.shipTypes = [...new Set(ships.ships.map(ship => ship.ship_type).filter(Boolean))].sort();
+      filterOptions.rarities = [...new Set(ships.ships.map(ship => ship.rarity).filter(Boolean))];
+      renderFilters();
+      await loadShips();
+      await loadNextTypeConfig();
+      await refreshNextOptions();
+      if (nextTypeConfig.length) {
+        await loadNextTargets();
+      } else {
+        renderNextTargets();
+      }
+      refreshSyncStatus();
+    }
+
+    document.getElementById('fName').addEventListener('input', event => {
+      filterState.name = event.target.value.trim();
+      clearTimeout(nameSearchTimer);
+      nameSearchTimer = setTimeout(loadShips, 300);
+    });
+
+    document.getElementById('filterGroups').addEventListener('click', event => {
+      const chip = event.target.closest('button.chip');
+      if (!chip) return;
+      filterState[chip.dataset.group] = chip.dataset.value;
+      renderFilters();
+      loadShips();
+    });
+
+    document.getElementById('nextTypeOptions').addEventListener('click', event => {
+      const chip = event.target.closest('button.chip');
+      if (!chip) return;
+      toggleNextType(chip.dataset.nextType);
+    });
+
+    async function toggleNextType(shipType) {
+      nextTypeConfig = nextTypeConfig.includes(shipType)
+        ? nextTypeConfig.filter(type => type !== shipType)
+        : [...nextTypeConfig, shipType];
+      renderNextTypes();
+    }
+
+    document.getElementById('nextTargets').addEventListener('click', event => {
+      const actionButton = event.target.closest('button[data-next-action]');
+      if (!actionButton) return;
+      completeShipStatus(Number(actionButton.dataset.id), actionButton.dataset.nextAction);
+    });
+
+    document.getElementById('shipTable').addEventListener('click', event => {
+      const deleteButton = event.target.closest('button[data-delete]');
+      if (deleteButton) {
+        requestDeleteShip(Number(deleteButton.dataset.id), deleteButton.dataset.name);
+        return;
+      }
+      const actionButton = event.target.closest('button[data-action]');
+      if (!actionButton) return;
+      completeShipStatus(Number(actionButton.dataset.id), actionButton.dataset.action);
+    });
+
+    initialize().catch(error => showMessage(error.message, true));
+  </script>
+</body>
+</html>

@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 COPY app.py /app/app.py
+COPY blhx /app/blhx
 
 ENV DATA_DIR=/data \
     HOST=0.0.0.0 \

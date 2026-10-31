@@ -1,6 +1,6 @@
 # 碧蓝航线练级数据记录
 
-一个用于记录碧蓝航线舰船练级状态的小型 Web 应用。当前实现刻意保持为“单文件 Python 应用 + 标准库 + SQLite”，便于部署和继续二次开发。
+一个用于记录碧蓝航线舰船练级状态的小型 Web 应用。当前实现使用“模块化 Python 应用 + 标准库 + SQLite”，不依赖前端构建工具，便于部署和继续二次开发。
 
 ## 技术架构
 
@@ -16,9 +16,9 @@ Python 标准库 HTTP Server
 SQLite 数据库
 ```
 
-- 后端框架：Python `http.server.ThreadingHTTPServer`，由 `app.py` 内的 `TrackerHandler` 统一处理路由。
-- 数据库：SQLite，默认位于 `DATA_DIR/blhx-training.sqlite3`。
-- 前端：内嵌在 `app.py` 的 HTML/CSS/JavaScript 页面，没有 Node.js 构建流程。
+- 后端框架：Python `http.server.ThreadingHTTPServer`，由 `blhx/server.py` 内的 `TrackerHandler` 统一处理路由。
+- 数据库：SQLite，默认位于 `DATA_DIR/blhx-training.sqlite3`；推荐配置保存在 `DATA_DIR/config.json`。
+- 前端：位于 `blhx/page.html` 的 HTML/CSS/JavaScript 页面，没有 Node.js 构建流程。
 - 外部数据源：碧蓝航线 Wiki 后端接口（MediaWiki revisions API 与 Semantic MediaWiki ask API）。
 - Excel：通过标准库 `zipfile` 和 `xml.etree.ElementTree` 读写 `.xlsx`，没有引入 `openpyxl`、`pandas` 等依赖。
 - 部署：单容器 Docker 部署，宿主机 `./data` 目录挂载到容器 `/data`。
@@ -27,7 +27,22 @@ SQLite 数据库
 
 ```text
 .
-├── app.py                     # 后端、前端、数据库、Wiki 抓取、Excel 处理
+├── app.py                     # 兼容入口与统一导出
+├── blhx/
+│   ├── constants.py           # 常量、排序规则与路径配置
+│   ├── utils.py               # 时间与通用工具
+│   ├── db.py                  # SQLite 连接与表结构初始化
+│   ├── history.py             # 操作历史记录与查询
+│   ├── tech.py                # 科技点属性与舰种解析
+│   ├── state.py               # Wiki 同步运行状态
+│   ├── ships.py               # 舰船 CRUD、筛选与状态更新
+│   ├── recommendations.py     # 单目标与按舰种分组推荐
+│   ├── config.py              # data/config.json 配置读写
+│   ├── wiki.py                # Wiki 抓取、解析与同步
+│   ├── excel.py               # Excel 读写与导入流程
+│   ├── page.py                # 前端页面加载
+│   ├── page.html              # 前端页面
+│   └── server.py              # HTTP 路由与服务入口
 ├── tests/
 │   └── test_app.py            # Wiki 解析、Excel 读写、导入流程测试
 ├── Dockerfile                 # Python 3.12-slim 镜像
@@ -65,6 +80,10 @@ SQLite 数据库
 | `points` | 保留字段，当前不再用于展示和筛选，固定为 `0` |
 
 一艘舰船可以有多条 `tech_points` 记录。若某舰船没有任何有效科技点，同步时会将 `needs_training` 写为 `否`；否则写为 `是`。
+
+#### `operation_logs`
+
+记录状态更新、删除、清空和 Excel 导入等操作。`created_at` 使用带毫秒精度的 UTC 时间戳；清空舰船时会通过外键级联删除关联的 `tech_points`，但保留操作历史。
 
 ## 开发环境
 
@@ -175,7 +194,17 @@ POST /api/import
 ```text
 GET /api/next?mode=idle&ship_type=战列
 GET /api/next?mode=train&ship_type=重巡
+GET /api/next?mode=train&ship_types=战列&ship_types=重巡
+GET /api/config
+POST /api/config
+GET /api/next-options
+GET /api/next-group?ship_types=战列&ship_types=重巡
+GET /api/operations?limit=200
 ```
+
+`ship_types` 支持传入多个舰种；页面推荐配置会使用该参数。若传入的舰种不存在或已没有可练级舰娘，推荐接口会返回错误。`GET /api/next-options` 只返回仍有可练级舰娘的舰种，并附带当前挂机与练级候选数量。
+
+页面先展示可选舰种，由用户选择后点击“确认推荐”，再调用 `GET /api/next-group` 输出结果。每个舰种单独占一行，分别展示下一个挂机目标与下一个练级目标；推荐结果中的“挂机完成”和“练级完成”按钮可直接更新状态，并自动刷新舰船表格、候选数量与推荐结果。
 
 `mode` 含义：
 
@@ -220,7 +249,7 @@ GET /api/ships
 | 参数 | 说明 |
 | --- | --- |
 | `name` | 舰船名称模糊查询 |
-| `ship_type` | 舰种精确匹配 |
+| `ship_type` | 舰种精确匹配；与 `tech_attribute` 同时使用时，也会匹配科技点前缀中列出的舰种 |
 | `rarity` | 稀有度精确匹配 |
 | `tech_attribute` | 匹配解锁图鉴或120级属性加成中的属性 |
 | `needs_training` | `是` / `否` |
@@ -260,7 +289,12 @@ GET /api/ships
 | --- | --- | --- |
 | `GET` | `/` | Web 页面 |
 | `GET` | `/api/ships` | 查询舰船列表 |
+| `GET` | `/api/config` | 读取推荐舰种配置 |
+| `POST` | `/api/config` | 保存推荐舰种配置 |
 | `GET` | `/api/next` | 获取下一个挂机或练级目标 |
+| `GET` | `/api/next-options` | 获取可配置的推荐舰种及候选数量 |
+| `GET` | `/api/next-group` | 按舰种分别获取挂机与练级推荐 |
+| `GET` | `/api/operations` | 查询操作历史 |
 | `POST` | `/api/sync` | 启动 Wiki 同步 |
 | `GET` | `/api/sync/status` | 查询同步进度 |
 | `GET` | `/api/template` | 下载 Excel 导入模板 |
@@ -272,6 +306,10 @@ GET /api/ships
 Web 页面筛选：
 
 - 舰种、稀有度、科技属性和三个状态筛选均为平铺按钮，点选后立即重新查询。
+- 舰种与科技属性同时筛选时，会分别解析科技点属性前缀中的每个舰种；例如 `战巡/战列/航战 耐久` 可被“战列 + 耐久”命中。
+- 推荐目标由用户选择多个舰种并点击“确认推荐”后输出；可选舰种仅包含仍存在可练级舰娘的类型，配置保存在 `data/config.json`。
+- 推荐结果按舰种逐行展示挂机与练级目标，并提供“挂机完成”“练级完成”快捷按钮；操作后自动刷新表格与推荐数据。
+- 页面顶部提供“操作历史”弹窗，记录状态更新、删除、清空和 Excel 导入等操作内容与毫秒级时间点。
 - 舰船名称输入后自动模糊查询。
 - 页面默认选中“已练级完成 = 否”。
 - 列表默认按实装日期升序排列。

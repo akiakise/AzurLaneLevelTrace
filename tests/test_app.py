@@ -27,15 +27,15 @@ class AppTests(unittest.TestCase):
                 return "{{舰娘图鉴}}".encode("utf-8")
 
         with patch.object(
-            app,
+            app.wiki,
             "urlopen",
             side_effect=[
                 HTTPError("https://example.test", 567, "Unknown Status", {}, None),
                 FakeResponse(),
             ],
         ), patch.object(
-            app, "acquire_wiki_request_slot", return_value=None
-        ), patch.object(app.time, "sleep") as sleep:
+            app.wiki, "acquire_wiki_request_slot", return_value=None
+        ), patch.object(app.wiki.time, "sleep") as sleep:
             result = app.fetch_wiki_text("/test")
 
         self.assertEqual(result, "{{舰娘图鉴}}")
@@ -81,10 +81,10 @@ class AppTests(unittest.TestCase):
             return FakeResponse("{{舰娘图鉴}}")
 
         with patch.object(
-            app, "urlopen", side_effect=urlopen_side_effect
+            app.wiki, "urlopen", side_effect=urlopen_side_effect
         ), patch.object(
             app, "acquire_wiki_request_slot", return_value=None
-        ), patch.object(app.time, "sleep"):
+        ), patch.object(app.wiki.time, "sleep"):
             result = app.fetch_wiki_text("/test")
 
         self.assertEqual(result, "{{舰娘图鉴}}")
@@ -140,7 +140,7 @@ class AppTests(unittest.TestCase):
             self.assertIn(f"offset={(2 - len(responses)) * 500}", params["query"])
             return responses.pop(0)
 
-        with patch("app.fetch_wiki_api", side_effect=fetch_wiki_api_side_effect):
+        with patch("app.wiki.fetch_wiki_api", side_effect=fetch_wiki_api_side_effect):
             entries = app.fetch_release_entries()
 
         self.assertEqual(
@@ -178,7 +178,7 @@ class AppTests(unittest.TestCase):
             "formatversion": "2",
         }
 
-        with patch("app.fetch_wiki_api", return_value=payload) as fetch_wiki_api:
+        with patch("app.wiki.fetch_wiki_api", return_value=payload) as fetch_wiki_api:
             raw_text = app.fetch_ship_raw("武藏")
 
         fetch_wiki_api.assert_called_once_with(expected_params)
@@ -220,8 +220,8 @@ class AppTests(unittest.TestCase):
     def test_fetch_ship_payload_logs_raw_response_on_parse_failure(self):
         entry = {"name": "杓鹬", "release_date": "2024-01-01"}
         with patch(
-            "app.fetch_ship_raw", return_value="{{非目标模板}}"
-        ), patch("app.parse_ship_raw", return_value=None):
+            "app.wiki.fetch_ship_raw", return_value="{{非目标模板}}"
+        ), patch("app.wiki.parse_ship_raw", return_value=None):
             with self.assertRaises(ValueError), self.assertLogs(
                 "blhx_training_tracker", level="ERROR"
             ) as logs:
@@ -231,8 +231,8 @@ class AppTests(unittest.TestCase):
 
     def test_init_db_cleans_existing_template_comments(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            app.DATA_DIR = Path(temp_dir)
-            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
             app.init_db()
             with app.get_connection() as connection:
                 ship = app.insert_ship(
@@ -267,11 +267,11 @@ class AppTests(unittest.TestCase):
 
     def test_import_process(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            app.DATA_DIR = Path(temp_dir)
-            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
             app.init_db()
             with app.get_connection() as connection:
-                app.insert_ship(
+                battle_ship = app.insert_ship(
                     connection,
                     "武藏",
                     "2023-08-17",
@@ -295,8 +295,8 @@ class AppTests(unittest.TestCase):
 
     def test_ship_filter_sort_and_status_update(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            app.DATA_DIR = Path(temp_dir)
-            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
             app.init_db()
             with app.get_connection() as connection:
                 ship_1 = app.insert_ship(
@@ -341,10 +341,239 @@ class AppTests(unittest.TestCase):
             self.assertTrue(updated["is_idling"])
             self.assertIsNone(updated["is_trained"])
 
+    def test_tech_attribute_matches_each_ship_type(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "易北",
+                    "2024-05-23",
+                    {
+                        "ship_type": "战巡",
+                        "rarity": "决战方案",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 2,
+                            }
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战列 耐久",
+                                "points": 2,
+                            }
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "重樱专属",
+                    "2024-05-23",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "重巡 耐久",
+                                "points": 2,
+                            }
+                        ],
+                    },
+                )
+
+            self.assertEqual(
+                app.parse_tech_attribute("战巡/战列/航战 耐久"),
+                (["战巡", "战列", "航战"], "耐久"),
+            )
+            ships = app.list_ships(
+                {"ship_type": "战列", "tech_attribute": "耐久"}
+            )
+            self.assertEqual([ship["name"] for ship in ships], ["武藏", "易北"])
+            ships = app.list_ships(
+                {"ship_type": "战列", "tech_attribute": "炮击"}
+            )
+            self.assertEqual(ships, [])
+
+    def test_next_ship_type_config_uses_data_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.config.CONFIG_PATH = Path(temp_dir) / "config.json"
+            app.init_db()
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 0,
+                            }
+                        ],
+                    },
+                )
+
+            saved = app.save_next_ship_types(["战列"])
+            self.assertEqual(saved, ["战列"])
+            self.assertEqual(app.read_config(), {"next_ship_types": ["战列"]})
+            with app.config.CONFIG_PATH.open(encoding="utf-8") as file:
+                import json
+
+                self.assertEqual(
+                    json.load(file), {"next_ship_types": ["战列"]}
+                )
+            with self.assertRaises(ValueError):
+                app.save_next_ship_types(["战列", "驱逐"])
+
+    def test_next_ship_supports_available_ship_types(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                battle_ship = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 26,
+                            }
+                        ],
+                    },
+                )
+                heavy_cruiser = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {
+                                "stage": "达到120级",
+                                "attribute": "重巡/轻巡 机动",
+                                "points": 5,
+                            }
+                        ],
+                    },
+                )
+                destroyer = app.insert_ship(
+                    connection,
+                    "夕立",
+                    "2017-05-25",
+                    {
+                        "ship_type": "驱逐",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "驱逐/轻巡 炮击",
+                                "points": 5,
+                            }
+                        ],
+                    },
+                )
+            app.update_ship_status(destroyer["id"], "is_trained", True)
+
+            options = app.available_next_ship_types()
+            self.assertEqual(
+                options,
+                [
+                    {"ship_type": "战列", "idle_count": 1, "train_count": 1},
+                    {"ship_type": "重巡", "idle_count": 1, "train_count": 1},
+                ],
+            )
+            ships = app.list_ships({"ship_types": ["战列", "重巡"]})
+            self.assertEqual(
+                [ship["name"] for ship in ships], ["古鹰", "武藏"]
+            )
+            self.assertEqual(
+                app.next_ship("train", ship_types=["战列", "重巡"])["name"],
+                "古鹰",
+            )
+            self.assertEqual(
+                app.next_ship("idle", ship_types=["重巡"])["name"], "古鹰"
+            )
+            grouped = app.next_ships_by_type("both", ["战列", "重巡"])
+            self.assertEqual(
+                [row["ship_type"] for row in grouped], ["战列", "重巡"]
+            )
+            self.assertEqual(grouped[0]["idle"]["name"], "武藏")
+            self.assertEqual(grouped[0]["train"]["name"], "武藏")
+            self.assertEqual(grouped[1]["idle"]["name"], "古鹰")
+            self.assertEqual(grouped[1]["train"]["name"], "古鹰")
+            with self.assertRaises(ValueError):
+                app.next_ship("train", ship_types=["战列", "驱逐"])
+
+            app.update_ship_status(heavy_cruiser["id"], "is_trained", True)
+            with self.assertRaises(ValueError):
+                app.next_ship("train", ship_types=["重巡"])
+
+    def test_operation_history_records_status_and_delete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.init_db()
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 0,
+                            }
+                        ],
+                    },
+                )
+
+            self.assertTrue(
+                app.update_ship_status(ship["id"], "is_idling", True)
+            )
+            self.assertTrue(app.delete_ship(ship["id"]))
+            operations = app.list_operations()
+            self.assertEqual(len(operations), 2)
+            self.assertEqual(operations[0]["message"], "删除舰娘「武藏」")
+            self.assertEqual(
+                operations[1]["message"], "标记为已挂机完成：武藏"
+            )
+            self.assertTrue(operations[0]["created_at"])
+
     def test_partial_sync_matches_and_overwrites(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            app.DATA_DIR = Path(temp_dir)
-            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
             app.init_db()
             with app.get_connection() as connection:
                 app.insert_ship(
@@ -378,8 +607,8 @@ class AppTests(unittest.TestCase):
                 ],
             }
             with patch(
-                "app.fetch_release_entries", return_value=[release_entry]
-            ), patch("app.fetch_ship_payload", return_value=parsed_ship):
+                "app.wiki.fetch_release_entries", return_value=[release_entry]
+            ), patch("app.wiki.fetch_ship_payload", return_value=parsed_ship):
                 app._sync_wiki(["武藏"])
 
             self.assertEqual(app.SYNC_STATE["processed"], 1)
@@ -391,7 +620,7 @@ class AppTests(unittest.TestCase):
     def test_partial_sync_requires_wiki_match(self):
         app.SYNC_STATE.update({"running": False, "status": "", "message": ""})
         with patch(
-            "app.fetch_release_entries",
+            "app.wiki.fetch_release_entries",
             return_value=[{"name": "武藏", "release_date": "2023-08-17"}],
         ):
             app._sync_wiki(["古鹰"])
@@ -400,8 +629,8 @@ class AppTests(unittest.TestCase):
 
     def test_delete_ship_removes_related_data(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            app.DATA_DIR = Path(temp_dir)
-            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
             app.init_db()
             with app.get_connection() as connection:
                 ship = app.insert_ship(
@@ -426,8 +655,8 @@ class AppTests(unittest.TestCase):
 
     def test_clear_ships_removes_all_data(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            app.DATA_DIR = Path(temp_dir)
-            app.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
+            app.db.DATA_DIR = Path(temp_dir)
+            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
             app.init_db()
             with app.get_connection() as connection:
                 for name, date, stage in [
