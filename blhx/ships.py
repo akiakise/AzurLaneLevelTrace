@@ -239,19 +239,39 @@ def update_ship_status(
     action_name = "已挂机完成" if field == "is_idling" else "已练级完成"
     action_text = "标记为" if value else "取消标记为"
     with get_connection() as connection:
-        connection.execute(
-            f"UPDATE ships SET {field} = ?, updated_at = ? WHERE id = ?",
-            (1 if value else 0, utc_now_text(), ship_id),
-        )
+        current = connection.execute(
+            "SELECT is_idling FROM ships WHERE id = ?",
+            (ship_id,),
+        ).fetchone()
+        if current is None:
+            return None
+        was_idling = current["is_idling"]
+        if field == "is_trained" and value:
+            connection.execute(
+                """
+                UPDATE ships
+                SET is_trained = 1, is_idling = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (utc_now_text(), ship_id),
+            )
+        else:
+            connection.execute(
+                f"UPDATE ships SET {field} = ?, updated_at = ? WHERE id = ?",
+                (1 if value else 0, utc_now_text(), ship_id),
+            )
         row = connection.execute(
             "SELECT id, name, ship_type, is_idling, is_trained FROM ships WHERE id = ?",
             (ship_id,),
         ).fetchone()
         if row is not None:
+            message = f"{action_text}{action_name}：{row['name']}"
+            if field == "is_trained" and value and not was_idling:
+                message += "（同时标记为已挂机完成）"
             record_operation(
                 connection,
                 field,
-                f"{action_text}{action_name}：{row['name']}",
+                message,
                 ship_id=row["id"],
                 ship_name=row["name"],
                 ship_type=row["ship_type"],

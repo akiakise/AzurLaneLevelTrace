@@ -32,9 +32,9 @@ def available_next_ship_types() -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT ship_type,
-                   COUNT(*) AS train_count,
                    SUM(CASE WHEN COALESCE(is_idling, 0) = 0 THEN 1 ELSE 0 END)
-                       AS idle_count
+                       AS idle_count,
+                   SUM(CASE WHEN is_idling = 1 THEN 1 ELSE 0 END) AS train_count
             FROM ships
             WHERE ship_type <> '' AND needs_training = 1
               AND COALESCE(is_trained, 0) = 0
@@ -92,7 +92,7 @@ def next_ship(
     filters = {
         "ship_types": ship_types,
         "needs_training": "是",
-        "is_idling": "否" if mode == "idle" else "",
+        "is_idling": "否" if mode == "idle" else "是",
         "is_trained": "否" if mode == "train" else "",
     }
     candidates = list_ships(filters)
@@ -142,7 +142,7 @@ def _best_ship_for_type(mode: str, ship_type: str) -> dict[str, Any] | None:
     filters = {
         "ship_types": [ship_type],
         "needs_training": "是",
-        "is_idling": "否" if mode == "idle" else "",
+        "is_idling": "否" if mode == "idle" else "是",
         "is_trained": "否" if mode == "train" else "",
     }
     candidates = list_ships(filters)

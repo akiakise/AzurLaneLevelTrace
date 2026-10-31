@@ -500,13 +500,37 @@ class AppTests(unittest.TestCase):
                     },
                 )
             app.update_ship_status(destroyer["id"], "is_trained", True)
+            self.assertTrue(
+                app.list_ships({"name": destroyer["name"]})[0]["is_idling"]
+            )
+            self.assertEqual(
+                app.list_operations()[0]["message"],
+                "标记为已练级完成：夕立（同时标记为已挂机完成）",
+            )
 
             options = app.available_next_ship_types()
             self.assertEqual(
                 options,
                 [
-                    {"ship_type": "战列", "idle_count": 1, "train_count": 1},
-                    {"ship_type": "重巡", "idle_count": 1, "train_count": 1},
+                    {"ship_type": "战列", "idle_count": 1, "train_count": 0},
+                    {"ship_type": "重巡", "idle_count": 1, "train_count": 0},
+                ],
+            )
+            self.assertIsNone(
+                app.next_ship("train", ship_types=["战列", "重巡"])
+            )
+            self.assertEqual(
+                app.next_ship("idle", ship_types=["重巡"])["name"], "古鹰"
+            )
+
+            app.update_ship_status(battle_ship["id"], "is_idling", True)
+            app.update_ship_status(heavy_cruiser["id"], "is_idling", True)
+            options = app.available_next_ship_types()
+            self.assertEqual(
+                options,
+                [
+                    {"ship_type": "战列", "idle_count": 0, "train_count": 1},
+                    {"ship_type": "重巡", "idle_count": 0, "train_count": 1},
                 ],
             )
             ships = app.list_ships({"ship_types": ["战列", "重巡"]})
@@ -517,16 +541,14 @@ class AppTests(unittest.TestCase):
                 app.next_ship("train", ship_types=["战列", "重巡"])["name"],
                 "古鹰",
             )
-            self.assertEqual(
-                app.next_ship("idle", ship_types=["重巡"])["name"], "古鹰"
-            )
+            self.assertIsNone(app.next_ship("idle", ship_types=["重巡"]))
             grouped = app.next_ships_by_type("both", ["战列", "重巡"])
             self.assertEqual(
                 [row["ship_type"] for row in grouped], ["战列", "重巡"]
             )
-            self.assertEqual(grouped[0]["idle"]["name"], "武藏")
+            self.assertIsNone(grouped[0]["idle"])
             self.assertEqual(grouped[0]["train"]["name"], "武藏")
-            self.assertEqual(grouped[1]["idle"]["name"], "古鹰")
+            self.assertIsNone(grouped[1]["idle"])
             self.assertEqual(grouped[1]["train"]["name"], "古鹰")
             with self.assertRaises(ValueError):
                 app.next_ship("train", ship_types=["战列", "驱逐"])
