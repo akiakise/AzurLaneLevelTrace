@@ -201,7 +201,11 @@ def clear_ships() -> int:
         return count
 
 
-def list_ships(filters: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_ship_conditions(
+    filters: dict[str, Any],
+    skip_fields: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[Any]]:
+    """按筛选条件生成 WHERE 片段；skip_fields 用于忽略指定状态筛选。"""
     conditions: list[str] = []
     parameters: list[Any] = []
     ship_type_filters = [
@@ -241,12 +245,12 @@ def list_ships(filters: dict[str, Any]) -> list[dict[str, Any]]:
     if filters.get("needs_training") in {"是", "否"}:
         conditions.append("s.needs_training = ?")
         parameters.append(1 if filters["needs_training"] == "是" else 0)
-    if filters.get("is_idling") in {"是", "否"}:
+    if "is_idling" not in skip_fields and filters.get("is_idling") in {"是", "否"}:
         if filters["is_idling"] == "是":
             conditions.append("s.is_idling = 1")
         else:
             conditions.append("COALESCE(s.is_idling, 0) = 0")
-    if filters.get("is_trained") in {"是", "否"}:
+    if "is_trained" not in skip_fields and filters.get("is_trained") in {"是", "否"}:
         if filters["is_trained"] == "是":
             conditions.append("s.is_trained = 1")
         else:
@@ -271,6 +275,28 @@ def list_ships(filters: dict[str, Any]) -> list[dict[str, Any]]:
             + ")"
         )
         parameters.extend(tech_parameters)
+    return conditions, parameters
+
+
+def count_pending_ship_statuses(filters: dict[str, Any]) -> dict[str, int]:
+    """统计当前其他筛选条件下未挂机与未练级的舰船数量。"""
+    counts: dict[str, int] = {}
+    for field in ("is_idling", "is_trained"):
+        conditions, parameters = _build_ship_conditions(
+            filters, frozenset({field})
+        )
+        conditions.append(f"COALESCE(s.{field}, 0) = 0")
+        with get_connection() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM ships s WHERE {' AND '.join(conditions)}",
+                parameters,
+            ).fetchone()
+        counts[field] = int(row[0]) if row else 0
+    return counts
+
+
+def list_ships(filters: dict[str, Any]) -> list[dict[str, Any]]:
+    conditions, parameters = _build_ship_conditions(filters)
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     with get_connection() as connection:

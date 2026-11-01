@@ -73,6 +73,7 @@ from blhx.core.constants import recommend_ship_type_sort_key
 from blhx.domain.ships import (
     clear_ship_statuses,
     clear_ships,
+    count_pending_ship_statuses,
     delete_ship,
     find_ship_brief,
     insert_ship,
@@ -153,6 +154,7 @@ __all__ = [
     "clean_template_value",
     "clear_ship_statuses",
     "clear_ships",
+    "count_pending_ship_statuses",
     "delete_ship",
     "empty_config",
     "extract_ship_entries",

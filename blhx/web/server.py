@@ -36,6 +36,7 @@ from ..domain.recommendations import available_next_ship_types, next_ship, next_
 from ..domain.ships import (
     clear_ship_statuses,
     clear_ships,
+    count_pending_ship_statuses,
     delete_ship,
     list_ships,
     update_ship_status,
@@ -146,7 +147,13 @@ class TrackerHandler(BaseHTTPRequestHandler):
                     content_type="image/png",
                 )
             elif path == "/api/ships":
-                self.send_json({"ships": list_ships(self.query_filters())})
+                filters = self.query_filters()
+                self.send_json(
+                    {
+                        "ships": list_ships(filters),
+                        "status_counts": count_pending_ship_statuses(filters),
+                    }
+                )
             elif path == "/api/filter-options":
                 self.send_json(
                     {

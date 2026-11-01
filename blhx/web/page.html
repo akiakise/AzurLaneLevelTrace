@@ -315,6 +315,7 @@
       recommendShipTypes: []
     };
     let nextOptions = [];
+    let statusCounts = { is_idling: null, is_trained: null };
     let nextTypeConfig = [];
     let nextTargets = [];
     let manualTargets = {};
@@ -378,7 +379,13 @@
       try {
         const result = await requestJson('/api/ships?' + params.toString());
         shipData = result.ships;
+        statusCounts = {
+          is_idling: null,
+          is_trained: null,
+          ...(result.status_counts || {})
+        };
         renderShips();
+        renderFilters();
         showMessage(`共 ${shipData.length} 条记录`);
       } catch (error) {
         showMessage(error.message, true);
@@ -544,12 +551,15 @@
         { key: 'bonus_ship_type', label: '加成舰种', options: ['', ...filterOptions.bonusShipTypes] },
         { key: 'bonus_attribute', label: '加成属性', options: ['', ...filterOptions.bonusAttributes] },
         { key: 'needs_training', label: '需要练级', options: ['', '是', '否'] },
-        { key: 'is_idling', label: '已挂机', options: ['', '是', '否'] },
-        { key: 'is_trained', label: '已练级', options: ['', '是', '否'] }
+        { key: 'is_idling', label: '已挂机', options: ['', '是', '否'], pendingLabel: '未挂机' },
+        { key: 'is_trained', label: '已练级', options: ['', '是', '否'], pendingLabel: '未练级' }
       ];
       document.getElementById('filterGroups').innerHTML = groups.map(group => `
         <div class="chip-group">
           <span class="chip-label">${escapeHtml(group.label)}</span>
+          ${group.pendingLabel && statusCounts[group.key] !== null
+            ? `<span class="chip-count">${escapeHtml(group.pendingLabel)} ${statusCounts[group.key]}</span>`
+            : ''}
           ${group.options.map(option => `
             <button type="button"
               class="chip ${filterState[group.key] === option ? 'selected' : ''}"

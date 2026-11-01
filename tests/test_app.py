@@ -551,6 +551,55 @@ class AppTests(unittest.TestCase):
             self.assertTrue(updated["is_idling"])
             self.assertIsNone(updated["is_trained"])
 
+    def test_pending_status_counts_ignore_own_filter(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship_1 = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "耐久", "points": 0}
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "机动", "points": 0}
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "夕立",
+                    "2017-05-25",
+                    {
+                        "ship_type": "驱逐",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "炮击", "points": 0}
+                        ],
+                    },
+                )
+            app.update_ship_status(ship_1["id"], "is_idling", True)
+
+            counts = app.count_pending_ship_statuses({"needs_training": "是"})
+            self.assertEqual(counts, {"is_idling": 2, "is_trained": 3})
+            # 统计时忽略本字段自身的筛选，但仍受其他筛选影响。
+            counts = app.count_pending_ship_statuses(
+                {"needs_training": "是", "is_idling": "是"}
+            )
+            self.assertEqual(counts, {"is_idling": 2, "is_trained": 1})
+
     def test_tech_attribute_matches_each_ship_type(self):
         with isolated_app_data():
             with app.get_connection() as connection:
@@ -1645,6 +1694,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("filterState.needs_training = '是';", html)
         self.assertIn("is_trained: ''", html)
         self.assertIn("filterState.is_trained = '';", html)
+        # 已挂机/已练级筛选行展示未处理数量，数据来自 /api/ships 的 status_counts。
+        self.assertIn("pendingLabel: '未挂机'", html)
+        self.assertIn("pendingLabel: '未练级'", html)
+        self.assertIn("result.status_counts", html)
         # 导入复用同步进度弹窗，完成后下载结果并整页刷新
         self.assertIn("function showImportOverlay()", html)
         self.assertIn("async function refreshImportStatus()", html)
