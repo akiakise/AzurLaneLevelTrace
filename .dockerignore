@@ -3,5 +3,12 @@ __pycache__/
 data/
 *.sqlite3
 *.sqlite3-journal
+tests/
+output/
+.idea/
+.github/
+docker-compose*.yml
+README.md
+AGENTS.md
 .git
 .env

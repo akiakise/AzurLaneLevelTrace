@@ -46,8 +46,9 @@ SQLite 数据库
 ├── tests/
 │   ├── support.py             # 测试数据目录隔离
 │   └── test_app.py            # Wiki 解析、Excel 读写、筛选与导入测试
-├── Dockerfile                 # Python 3.12-slim 镜像
-├── docker-compose.yml         # 本地部署配置
+├── Dockerfile                 # Python 3.12-slim-bookworm 镜像
+├── docker-compose.yml         # 拉取 Docker Hub 预构建镜像的部署配置
+├── .github/workflows/         # GitHub Actions 自动构建与镜像推送
 ├── README.md
 ├── .dockerignore
 └── .gitignore
@@ -403,10 +404,11 @@ Web 页面筛选：
 
 ## Docker 部署
 
-启动：
+首次部署时拉取 Docker Hub 上的预构建镜像并启动：
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 停止：
@@ -432,6 +434,35 @@ SQLite 文件位于：
 ```text
 ./data/blhx-training.sqlite3
 ```
+
+### 自动构建与镜像推送
+
+仓库推送到 `main` 后，GitHub Actions 会自动构建镜像并推送到 Docker Hub，工作流文件为 `.github/workflows/docker-publish.yml`。镜像地址：
+
+```text
+akise/azur-lane-level-trace:latest
+akise/azur-lane-level-trace:sha-<提交短哈希>
+```
+
+首次使用前，在 Docker Hub 创建公开仓库 `azur-lane-level-trace`，并在 GitHub 仓库的 `Settings > Secrets and variables > Actions` 中添加：
+
+- `DOCKERHUB_USERNAME`：Docker Hub 用户名 `akise`。
+- `DOCKERHUB_TOKEN`：Docker Hub 账号设置中创建的 Access Token，权限选择 `Read & Write`。
+
+私有 Docker Hub 仓库需要先在服务器登录：
+
+```bash
+docker login -u akise
+```
+
+后续更新只需重新拉取并重建容器：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+`./data` 仍然挂载到容器 `/data`，更新镜像不会影响 SQLite 数据。如果希望服务器全自动更新，可以再部署 Watchtower 定时执行上述拉取动作；默认不启用，便于在更新前自行确认。
 
 ### 筛选项顺序
 

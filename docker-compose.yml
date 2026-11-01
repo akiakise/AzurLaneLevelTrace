@@ -1,6 +1,6 @@
 services:
   blhx-training:
-    build: .
+    image: akise/azur-lane-level-trace:latest
     container_name: blhx-training
     ports:
       - "8000:8000"
