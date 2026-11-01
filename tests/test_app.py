@@ -1640,9 +1640,11 @@ class AppTests(unittest.TestCase):
         self.assertIn("recommend_ship_types", html)
         self.assertIn("function rowHasTargets(row) {", html)
         self.assertIn("所选舰种暂无可推荐舰娘", html)
-        # 默认仅展示需要练级且尚未练级完成的舰船，重置筛选后保持一致。
+        # 默认仅展示需要练级的舰船，已练级不预设筛选；重置筛选后保持一致。
         self.assertIn("needs_training: '是',", html)
         self.assertIn("filterState.needs_training = '是';", html)
+        self.assertIn("is_trained: ''", html)
+        self.assertIn("filterState.is_trained = '';", html)
         # 导入复用同步进度弹窗，完成后下载结果并整页刷新
         self.assertIn("function showImportOverlay()", html)
         self.assertIn("async function refreshImportStatus()", html)
