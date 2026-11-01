@@ -1445,6 +1445,24 @@ class AppTests(unittest.TestCase):
         self.assertLess(trained, clear)
         self.assertLess(clear, delete)
 
+    def test_page_mobile_layout_support(self):
+        html = app.PAGE_HTML
+        self.assertIn('content="width=device-width, initial-scale=1, viewport-fit=cover"', html)
+        self.assertIn("@media (max-width:820px)", html)
+        # 断点以上表格在容器内横向滚动，避免 700px 左右宽度撑破整页。
+        self.assertIn('<div class="table-scroll">', html)
+        self.assertIn(".table-scroll table { min-width:900px; }", html)
+        self.assertIn('.ships-table thead { display:none; }', html)
+        self.assertIn(".ships-table td::before { content:attr(data-label);", html)
+        # 状态为空时仍保留字段名，并显示“未记录”，避免卡片式布局丢行。
+        self.assertIn('.ships-table td:empty::after { content:"未记录";', html)
+        self.assertIn(".ships-table td[colspan]", html)
+        self.assertIn('.next-table thead { display:none; }', html)
+        # 每个数据单元格都带移动端标签，卡片布局才有维度名称。
+        for label in ("舰船名称", "舰种", "稀有度", "获得", "120级", "实装日期", "是否需要练级", "是否已挂机", "是否已练级完成", "操作", "挂机目标", "练级目标"):
+            self.assertIn(f'data-label="{label}"', html)
+        self.assertIn('env(safe-area-inset-bottom)', html)
+
     def test_import_triggers_full_page_reload(self):
         import shutil
         import subprocess

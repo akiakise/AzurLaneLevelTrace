@@ -2,11 +2,12 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>碧蓝航线练级数据记录</title>
   <style>
     :root { color-scheme: dark; --bg:#0f172a; --panel:#16213c; --panel2:#1e293b; --line:#2f3f5d; --text:#e6edf7; --muted:#9db0c9; --blue:#38bdf8; --green:#4ade80; --red:#f87171; }
     * { box-sizing:border-box; }
+    html { -webkit-text-size-adjust:100%; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; }
     body.loading { overflow:hidden; cursor:progress; user-select:none; }
     body.loading button:not(.sync-close), body.loading input, body.loading select { pointer-events:none; opacity:.6; }
@@ -77,6 +78,8 @@
     .ship-name { font-size:21px; font-weight:700; }
     .ship-meta { color:var(--muted); margin-top:6px; }
     table { width:100%; border-collapse:collapse; margin-top:16px; }
+    .table-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    .table-scroll table { min-width:900px; }
     th,td { padding:12px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
     th { color:var(--muted); font-size:12px; white-space:nowrap; background:#172136; position:sticky; top:0; }
     tr:hover td { background:rgba(56,189,248,.05); }
@@ -115,7 +118,54 @@
     .sync-stat-value { font-size:17px; font-weight:700; }
     .sync-errors { max-height:130px; overflow:auto; margin:14px 0 0; padding-left:18px; color:var(--red); font-size:12px; line-height:1.6; }
     .sync-close { display:block; width:100%; margin-top:20px; }
-    @media (max-width:680px) { header { display:block; } .toolbar { margin-top:14px; } .chip-label { min-width:100%; } th,td { padding:9px 6px; } .sync-stats { grid-template-columns:1fr; } }
+    @media (max-width:820px) {
+      .container { padding:18px 12px calc(48px + env(safe-area-inset-bottom)); }
+      header { display:block; }
+      h1 { font-size:22px; line-height:1.35; }
+      .subtitle { font-size:13px; }
+      .toolbar { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:14px; }
+      .toolbar > button, .toolbar > .button { width:100%; padding:11px 8px; }
+      button, .button { min-height:44px; }
+      input, select, textarea, .modal textarea { font-size:16px; }
+      .card { padding:14px; border-radius:12px; }
+      .name-search { max-width:none; margin:12px 0; }
+      .chip-group { gap:7px; }
+      .chip-label { min-width:100%; }
+      .chip { padding:8px 12px; }
+      .chip.small { min-height:40px; padding:4px 10px; }
+      .next-head { align-items:flex-start; }
+      .next-target-head { flex-wrap:wrap; }
+      .next-target-controls { flex-wrap:wrap; }
+      .next-ship-actions button, .row-actions button { min-height:44px; }
+      .next-table thead { display:none; }
+      .next-table, .next-table tbody, .next-table tr, .next-table td { display:block; width:100%; }
+      .next-table tr { margin-bottom:12px; padding:12px; border:1px solid var(--line); border-radius:10px; background:rgba(11,17,32,.55); }
+      .next-table td { border:0; padding:0 0 10px; word-break:break-word; }
+      .next-table td:last-child { padding-bottom:0; }
+      .next-table td::before { content:attr(data-label); display:block; margin-bottom:6px; color:var(--muted); font-size:12px; }
+      .ships-table thead { display:none; }
+      .table-scroll { overflow-x:visible; }
+      .table-scroll table, .ships-table { min-width:0; }
+      .ships-table, .ships-table tbody, .ships-table tr, .ships-table td { display:block; width:100%; }
+      .ships-table tr { margin-bottom:12px; padding:12px; border:1px solid var(--line); border-radius:10px; background:rgba(11,17,32,.55); }
+      .ships-table tr:hover td { background:transparent; }
+      .ships-table td { display:flex; gap:10px; border:0; padding:5px 0; word-break:break-word; }
+      .ships-table td::before { content:attr(data-label); flex:0 0 86px; color:var(--muted); font-size:12px; line-height:1.6; }
+      .ships-table td[data-label="舰船名称"] { font-size:17px; font-weight:700; padding-bottom:8px; }
+      .ships-table td[data-label="操作"] { display:block; padding-top:10px; }
+      .ships-table td[data-label="操作"]::before { display:block; margin-bottom:6px; }
+      .ships-table td:empty::after { content:"未记录"; color:var(--muted); }
+      .ships-table td[colspan] { display:block; }
+      .ships-table td[colspan]::before { display:none; }
+      .row-actions { gap:8px; }
+      .modal-overlay, .sync-overlay { align-items:flex-start; overflow:auto; padding:max(12px,env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); }
+      .modal, .sync-modal, .picker-modal, .history-modal { width:100%; max-height:none; padding:18px; border-radius:12px; }
+      .modal-footer { flex-wrap:wrap; }
+      .modal-footer button { flex:1 1 140px; }
+      .toast-stack { left:12px; right:12px; bottom:calc(12px + env(safe-area-inset-bottom)); align-items:stretch; }
+      .toast { width:100%; }
+      .sync-stats { grid-template-columns:1fr; }
+    }
   </style>
 </head>
 <body>
@@ -243,10 +293,12 @@
       </div>
       <div id="filterGroups" class="filter-groups"></div>
       <div id="message" class="status-line"></div>
-      <table>
-        <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>是否已练级完成</th><th>操作</th></tr></thead>
-        <tbody id="shipTable"><tr><td colspan="10" class="empty">加载中...</td></tr></tbody>
-      </table>
+      <div class="table-scroll">
+        <table class="ships-table">
+          <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>是否已练级完成</th><th>操作</th></tr></thead>
+          <tbody id="shipTable"><tr><td colspan="10" class="empty">加载中...</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -353,16 +405,16 @@
         }
         actionButtons.push(`<button type="button" class="danger" data-delete data-id="${escapeAttr(ship.id)}" data-name="${escapeAttr(ship.name)}">删除</button>`);
         return `<tr>
-          <td><a href="${escapeAttr(ship.wiki_url)}" target="_blank" style="color:#e6edf7;">${escapeHtml(ship.name)}</a></td>
-          <td>${escapeHtml(ship.ship_type || '')}</td>
-          <td>${escapeHtml(ship.rarity || '')}</td>
-          <td>${escapeHtml(stageTech('解锁图鉴'))}</td>
-          <td>${escapeHtml(stageTech('达到120级'))}</td>
-          <td>${escapeHtml(ship.release_date || '')}</td>
-          <td class="${ship.needs_training ? 'yes' : 'empty'}">${ship.needs_training ? '是' : '否'}</td>
-          <td class="${statusClass(ship.is_idling)}">${statusText(ship.is_idling)}</td>
-          <td class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
-          <td><div class="row-actions">${actionButtons.join('')}</div></td>
+          <td data-label="舰船名称"><a href="${escapeAttr(ship.wiki_url)}" target="_blank" style="color:#e6edf7;">${escapeHtml(ship.name)}</a></td>
+          <td data-label="舰种">${escapeHtml(ship.ship_type || '')}</td>
+          <td data-label="稀有度">${escapeHtml(ship.rarity || '')}</td>
+          <td data-label="获得">${escapeHtml(stageTech('解锁图鉴'))}</td>
+          <td data-label="120级">${escapeHtml(stageTech('达到120级'))}</td>
+          <td data-label="实装日期">${escapeHtml(ship.release_date || '')}</td>
+          <td data-label="是否需要练级" class="${ship.needs_training ? 'yes' : 'empty'}">${ship.needs_training ? '是' : '否'}</td>
+          <td data-label="是否已挂机" class="${statusClass(ship.is_idling)}">${statusText(ship.is_idling)}</td>
+          <td data-label="是否已练级完成" class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
+          <td data-label="操作"><div class="row-actions">${actionButtons.join('')}</div></td>
         </tr>`;
       }).join('');
     }
@@ -473,9 +525,9 @@
           <tbody>
             ${visibleRows.map(row => `
               <tr>
-                <td>${escapeHtml(row.ship_type)}</td>
-                <td>${recommendationCell(row, 'idle', 'is_idling')}</td>
-                <td>${recommendationCell(row, 'train', 'is_trained')}</td>
+                <td data-label="舰种">${escapeHtml(row.ship_type)}</td>
+                <td data-label="挂机目标">${recommendationCell(row, 'idle', 'is_idling')}</td>
+                <td data-label="练级目标">${recommendationCell(row, 'train', 'is_trained')}</td>
               </tr>
             `).join('')}
           </tbody>
