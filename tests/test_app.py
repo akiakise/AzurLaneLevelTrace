@@ -1814,6 +1814,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("pendingLabel: '未挂机'", html)
         self.assertIn("pendingLabel: '未练级'", html)
         self.assertIn("result.status_counts", html)
+        # 未挂机/未练级数量排在筛选项按钮之后，与筛选按钮同一行展示。
+        options_loop = html.index("${group.options.map(option => `")
+        pending_count = html.index("${group.pendingLabel && statusCounts[group.key] !== null")
+        self.assertLess(options_loop, pending_count)
         # 导入复用同步进度弹窗，完成后下载结果并整页刷新
         self.assertIn("function showImportOverlay()", html)
         self.assertIn("async function refreshImportStatus()", html)

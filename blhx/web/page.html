@@ -558,9 +558,6 @@
       document.getElementById('filterGroups').innerHTML = groups.map(group => `
         <div class="chip-group">
           <span class="chip-label">${escapeHtml(group.label)}</span>
-          ${group.pendingLabel && statusCounts[group.key] !== null
-            ? `<span class="chip-count">${escapeHtml(group.pendingLabel)} ${statusCounts[group.key]}</span>`
-            : ''}
           ${group.options.map(option => `
             <button type="button"
               class="chip ${filterState[group.key] === option ? 'selected' : ''}"
@@ -568,6 +565,9 @@
               data-value="${escapeAttr(option)}"
             >${escapeHtml(option || '全部')}</button>
           `).join('')}
+          ${group.pendingLabel && statusCounts[group.key] !== null
+            ? `<span class="chip-count">${escapeHtml(group.pendingLabel)} ${statusCounts[group.key]}</span>`
+            : ''}
         </div>
       `).join('');
     }
