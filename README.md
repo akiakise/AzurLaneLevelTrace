@@ -56,6 +56,7 @@ SQLite 数据库
 │   ├── support.py             # 测试数据目录隔离
 │   └── test_app.py            # Wiki 解析、CSV 读写、筛选与导入测试
 ├── Dockerfile                 # Python 3.12-slim-bookworm 镜像
+├── VERSION                    # 应用与镜像版本号（<major>.<minor>.<patch>）
 ├── docker-compose.yml         # 拉取 Docker Hub 预构建镜像的部署配置
 ├── .github/workflows/         # GitHub Actions 自动构建与镜像推送
 ├── README.md
@@ -451,14 +452,31 @@ SQLite 文件位于：
 ./data/blhx-training.sqlite3
 ```
 
+确认容器内运行的版本：
+
+```bash
+docker compose exec blhx-training python -c "import app; print(app.APP_VERSION)"
+curl -s http://localhost:8000/api/version
+```
+
 ### 自动构建与镜像推送
 
-仓库推送到 `main` 后，GitHub Actions 会自动构建镜像并推送到 Docker Hub，工作流文件为 `.github/workflows/docker-publish.yml`。镜像地址：
+仓库推送到 `main` 后，GitHub Actions 会自动升级版本号、构建镜像并推送到 Docker Hub，工作流文件为 `.github/workflows/docker-publish.yml`。每次发布同时推送版本标签与 `latest`，不再推送 sha 标签：
 
 ```text
 akise/azur-lane-level-trace:latest
-akise/azur-lane-level-trace:sha-<提交短哈希>
+akise/azur-lane-level-trace:<major>.<minor>.<patch>
 ```
+
+版本号唯一来源是仓库根目录的 `VERSION` 文件，应用通过 `/api/version` 和页面标题下方的 `v<版本>` 展示，容器启动时 `Server` 响应头也使用该版本。
+
+发布流程：
+
+1. 推送到 `main` 触发工作流，读取 `VERSION` 并按 patch 段 `+1`（如 `1.0.3` → `1.0.4`）。
+2. 以 `chore(release): v<版本>` 提交并推送回 `main`；该提交再次触发工作流时会被识别并跳过，避免重复升版。
+3. 用升版后的提交构建 `linux/amd64,linux/arm64` 多架构镜像，推送 `<版本>` 与 `latest` 两个标签。
+
+手动触发 `workflow_dispatch` 时不升版，按当前 `VERSION` 重新构建并推送镜像，适合重发失败发布或用例验证。需要指定大/小版本时，直接修改 `VERSION` 并推送 `main`，patch 会在其基础上继续自增。
 
 首次使用前，在 Docker Hub 创建公开仓库 `azur-lane-level-trace`，并在 GitHub 仓库的 `Settings > Secrets and variables > Actions` 中添加：
 

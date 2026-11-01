@@ -70,6 +70,7 @@ from blhx.domain.recommendations import (
 )
 from blhx.web.server import TrackerHandler, main
 from blhx.core.constants import recommend_ship_type_sort_key
+from blhx.core.version import APP_VERSION
 from blhx.domain.ships import (
     clear_ship_statuses,
     clear_ships,
@@ -115,6 +116,7 @@ __all__ = [
     "IMPORT_HEADERS",
     "REPORT_HEADERS",
     "BASE_DIR",
+    "APP_VERSION",
     "BONUS_ATTRIBUTE_ORDER",
     "BONUS_SHIP_TYPE_ORDER",
     "CONFIG_PATH",

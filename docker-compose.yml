@@ -1,5 +1,6 @@
 services:
   blhx-training:
+    # 固定版本时改为具体标签，例如 akise/azur-lane-level-trace:1.0.4
     image: akise/azur-lane-level-trace:latest
     container_name: blhx-training
     ports:

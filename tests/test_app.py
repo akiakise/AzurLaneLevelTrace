@@ -459,6 +459,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(errors, [])
 
     def test_page_serves_icon_and_declares_favicon(self):
+        import json
         import threading
         import urllib.request
         from http.server import ThreadingHTTPServer
@@ -473,10 +474,13 @@ class AppTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/icon.png") as response:
                     icon = response.read()
                     content_type = response.headers["Content-Type"]
+                with urllib.request.urlopen(base + "/api/version") as response:
+                    version_payload = json.loads(response.read().decode("utf-8"))
                 self.assertIn('href="/icon.png"', html)
                 self.assertIn('rel="icon"', html)
                 self.assertEqual(content_type, "image/png")
                 self.assertTrue(icon.startswith(b"\x89PNG\r\n\x1a\n"))
+                self.assertEqual(version_payload["version"], app.APP_VERSION)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -599,6 +603,11 @@ class AppTests(unittest.TestCase):
                 {"needs_training": "是", "is_idling": "是"}
             )
             self.assertEqual(counts, {"is_idling": 2, "is_trained": 1})
+            self.assertRegex(app.APP_VERSION, r"^\d+\.\d+\.\d+$")
+            self.assertEqual(
+                app.APP_VERSION,
+                (app.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip(),
+            )
 
     def test_tech_attribute_matches_each_ship_type(self):
         with isolated_app_data():

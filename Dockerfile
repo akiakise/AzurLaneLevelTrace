@@ -3,6 +3,7 @@ FROM python:3.12-slim-bookworm
 WORKDIR /app
 COPY app.py /app/app.py
 COPY blhx /app/blhx
+COPY VERSION /app/VERSION
 
 ENV DATA_DIR=/data \
     HOST=0.0.0.0 \

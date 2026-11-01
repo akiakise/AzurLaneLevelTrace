@@ -42,12 +42,13 @@ from ..domain.ships import (
     update_ship_status,
 )
 from ..core.state import SYNC_STATE
+from ..core.version import APP_VERSION
 from ..datasource.wiki import start_sync
 
 
 class TrackerHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "BLHXTrainingTracker/1.0"
+    server_version = f"BLHXTrainingTracker/{APP_VERSION}"
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -162,8 +163,11 @@ class TrackerHandler(BaseHTTPRequestHandler):
                         "bonus_ship_types": BONUS_SHIP_TYPE_ORDER,
                         "bonus_attributes": BONUS_ATTRIBUTE_ORDER,
                         "recommend_ship_types": RECOMMEND_SHIP_TYPE_ORDER,
+                        "version": APP_VERSION,
                     }
                 )
+            elif path == "/api/version":
+                self.send_json({"version": APP_VERSION})
             elif path == "/api/config":
                 self.send_json(read_config())
             elif path == "/api/next-options":

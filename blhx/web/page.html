@@ -17,6 +17,7 @@
     header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
     h1 { font-size:26px; margin:0; }
     .subtitle { color:var(--muted); margin-top:6px; }
+    .version-tag { color:var(--muted); font-size:12px; margin-left:8px; }
     .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     button,.button { border:1px solid #35507a; background:var(--panel2); color:var(--text); padding:10px 16px; border-radius:8px; cursor:pointer; text-decoration:none; font-size:14px; transition:.2s; }
     button:hover,.button:hover { border-color:var(--blue); color:var(--blue); }
@@ -268,7 +269,7 @@
     <header>
       <div>
         <h1>碧蓝航线练级数据记录</h1>
-        <div class="subtitle">全量同步 · CSV 导入 · 挂机与练级排序</div>
+        <div class="subtitle">全量同步 · CSV 导入 · 挂机与练级排序<span id="versionTag" class="version-tag"></span></div>
       </div>
       <div class="toolbar">
         <button id="syncButton" class="primary" onclick="requestFullSync()">全量同步</button>
@@ -1169,6 +1170,9 @@
       filterOptions.bonusShipTypes = options.bonus_ship_types;
       filterOptions.bonusAttributes = options.bonus_attributes;
       filterOptions.recommendShipTypes = options.recommend_ship_types || [];
+      if (options.version) {
+        document.getElementById('versionTag').textContent = 'v' + options.version;
+      }
       renderFilters();
       await loadShips();
       await loadNextTypeConfig();

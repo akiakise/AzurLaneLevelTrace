@@ -1,4 +1,4 @@
-name: Build and push Docker image
+name: Release and push Docker image
 
 on:
   push:
@@ -7,18 +7,124 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: docker-publish-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      should_build: ${{ steps.version.outputs.should_build }}
+      commit_sha: ${{ steps.publish.outputs.commit_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          current="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$current" ]; then
+            echo "VERSION 文件为空或缺失" >&2
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "手动触发：沿用当前版本 $current 重新构建镜像"
+            echo "version=$current" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          major="${current%%.*}"
+          rest="${current#*.}"
+          minor="${rest%%.*}"
+          patch="${rest##*.}"
+          if ! printf '%s%s%s' "$major" "$minor" "$patch" | grep -Eq '^[0-9]+$'; then
+            echo "VERSION 不是合法的 <major>.<minor>.<patch>：$current" >&2
+            exit 1
+          fi
+
+          # 本工作流为升级版本而产生的提交，不再重复升版，也不再重复构建镜像。
+          if printf '%s' "$COMMIT_MESSAGE" | head -n1 | grep -q '^chore(release):'; then
+            echo "检测到版本升级提交，跳过重复处理"
+            echo "version=$current" >> "$GITHUB_OUTPUT"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          next="$major.$minor.$((10#$patch + 1))"
+          echo "$next" > VERSION
+          echo "VERSION 更新为：$next"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push version bump
+        id: publish
+        if: steps.version.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git add VERSION
+          git commit -m "chore(release): v${{ steps.version.outputs.version }}"
+          pushed=0
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              pushed=1
+              break
+            fi
+            echo "推送失败（第 $attempt 次），先同步远端 main 后重试" >&2
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "与远端 main 冲突，无法自动升版，请手动处理 VERSION" >&2
+              exit 1
+            fi
+          done
+          if [ "$pushed" != "1" ]; then
+            echo "版本提交推送失败，终止发布" >&2
+            exit 1
+          fi
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: release
+    if: needs.release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Verify version file
+        run: |
+          set -euo pipefail
+          expected="${{ needs.release.outputs.version }}"
+          actual="$(tr -d '[:space:]' < VERSION)"
+          if [ "$expected" != "$actual" ]; then
+            echo "VERSION 不一致：期望 $expected，实际 $actual" >&2
+            exit 1
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -38,8 +144,10 @@ jobs:
         with:
           images: akise/azur-lane-level-trace
           tags: |
+            type=raw,value=${{ needs.release.outputs.version }}
             type=raw,value=latest
-            type=sha,format=short
+          labels: |
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
