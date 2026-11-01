@@ -654,6 +654,68 @@ class AppTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(content, "1.2.3\n")
 
+    def test_release_notes_lists_commit_hash_link_and_message(self):
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / ".github" / "scripts" / "generate_release_notes.sh"
+        self.assertTrue(script.is_file())
+
+        def git(cwd, *args):
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            scripts = repo / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            shutil.copy(script, scripts / script.name)
+            git(repo, "init", "-q")
+            git(repo, "config", "user.email", "test@example.com")
+            git(repo, "config", "user.name", "tester")
+
+            (repo / "a.txt").write_text("a", encoding="utf-8")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "feat: 第一个提交")
+            git(repo, "tag", "v1.0.0")
+
+            (repo / "b.txt").write_text("b", encoding="utf-8")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "fix: 第二个提交\n\n补充说明行")
+            second_sha = git(repo, "rev-parse", "HEAD")
+            short_sha = git(repo, "rev-parse", "--short", "HEAD")
+
+            output = Path(temp_dir) / "notes.md"
+            subprocess.run(
+                [str(scripts / script.name)],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=dict(
+                    os.environ,
+                    REPOSITORY="owner/repo",
+                    VERSION="1.0.1",
+                    TAG="v1.0.1",
+                    OUTPUT=str(output),
+                ),
+            )
+            notes = output.read_text(encoding="utf-8")
+
+        self.assertIn(f"[`{short_sha}`](https://github.com/owner/repo/commit/{second_sha})", notes)
+        self.assertIn("fix: 第二个提交", notes)
+        self.assertIn("补充说明行", notes)
+        # 只包含上一版本标签之后的提交，不重复列出旧版本内容。
+        self.assertNotIn("feat: 第一个提交", notes)
+
     def test_tech_attribute_matches_each_ship_type(self):
         with isolated_app_data():
             with app.get_connection() as connection:

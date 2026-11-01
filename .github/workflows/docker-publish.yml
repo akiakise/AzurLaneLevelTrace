@@ -104,6 +104,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Generate release notes
+        if: steps.version.outputs.should_release == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          OUTPUT: ${{ github.workspace }}/release-notes.md
+        run: |
+          set -euo pipefail
+          ./.github/scripts/generate_release_notes.sh
+          cat "$OUTPUT"
+
       - name: Create GitHub Release
         if: steps.version.outputs.should_release == 'true'
         env:
@@ -112,15 +124,15 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG"
+            gh release edit "$TAG" --title "$TAG" --notes-file "$GITHUB_WORKSPACE/release-notes.md"
             echo "已更新 GitHub Release：$TAG"
           elif git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$GITHUB_WORKSPACE/release-notes.md"
             echo "已基于现有标签创建 GitHub Release：$TAG"
           else
             gh release create "$TAG" \
               --target "${{ github.sha }}" \
               --title "$TAG" \
-              --generate-notes
+              --notes-file "$GITHUB_WORKSPACE/release-notes.md"
             echo "已创建 GitHub Release：$TAG"
           fi

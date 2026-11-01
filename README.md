@@ -484,7 +484,14 @@ curl -s http://localhost:8000/api/version
 
 2. 提交并推送到 `main`。
 3. GitHub Actions 读取 `VERSION` 构建 `linux/amd64,linux/arm64` 多架构镜像，推送 `akise/azur-lane-level-trace:latest` 与 `akise/azur-lane-level-trace:<VERSION>` 两个标签。
-4. 同时创建 Git 标签 `v<VERSION>` 与同名 GitHub Release，Release 说明自动按提交记录生成。
+4. 同时创建 Git 标签 `v<VERSION>` 与同名 GitHub Release；发布说明列出上一版本标签以来的每个提交，包含短 hash、GitHub 提交链接和完整 commit message（多行正文一并附上）。
+
+发布说明由 `.github/scripts/generate_release_notes.sh` 生成，本地可预览：
+
+```bash
+REPOSITORY=akiakise/AzurLaneLevelTrace VERSION=1.0.1 TAG=v1.0.1 \
+  OUTPUT=/tmp/release-notes.md ./.github/scripts/generate_release_notes.sh
+```
 
 工作流文件为 `.github/workflows/docker-publish.yml`。若 `v<VERSION>` 的 Release 已存在，说明本次推送没有改版本，工作流会自动跳过，不会覆盖已有镜像和 Release；需要重新发布同一版本时，在 Actions 页面手动触发 `workflow_dispatch` 并勾选 `force`。
 
