@@ -265,13 +265,88 @@ class AppTests(unittest.TestCase):
             ships = app.list_ships({"name": "易北·META"})
             self.assertEqual(ships[0]["rarity"], "超稀有")
 
-    def test_xlsx_roundtrip(self):
+    def test_csv_roundtrip(self):
+        rows = [
+            ["舰船名称", "是否已挂机", "是否已练级完成"],
+            ["武藏", "是", "否"],
+            ['带,逗号"与引号', "否", "是"],
+            ["多行\n名称", "是", "是"],
+        ]
+        data = app.csv_write(rows)
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(app.csv_read(data), rows)
+
+    def test_csv_read_accepts_bom_utf8_and_gb18030(self):
         rows = [
             ["舰船名称", "是否已挂机", "是否已练级完成"],
             ["武藏", "是", "否"],
         ]
-        data = app.xlsx_write(rows, "测试")
-        self.assertEqual(app.xlsx_read(data), rows)
+        body = "舰船名称,是否已挂机,是否已练级完成\r\n武藏,是,否\r\n"
+        self.assertEqual(app.csv_read(body.encode("utf-8")), rows)
+        self.assertEqual(app.csv_read(body.encode("gb18030")), rows)
+
+    def test_csv_read_rejects_invalid_encoding_and_syntax(self):
+        with self.assertRaises(app.CsvFormatError):
+            app.csv_read(b"\xff\xfe\x00\x01\xff\xff")
+        with self.assertRaises(app.CsvFormatError):
+            app.csv_read(
+                '舰船名称,是否已挂机,是否已练级完成\r\n"未闭合,是,否\r\n'.encode(
+                    "utf-8"
+                )
+            )
+
+    def test_parse_workbook_rows_rejects_duplicate_and_unknown_layout(self):
+        with self.assertRaises(app.CsvFormatError):
+            app.parse_workbook_rows(
+                [["舰船名称", "舰船名称", "是否已挂机", "是否已练级完成"], ["武藏", "错误", "是", "否"]]
+            )
+        with self.assertRaises(app.CsvFormatError):
+            app.parse_workbook_rows([["舰船名称", "是否已挂机"]])
+        with self.assertRaises(app.CsvFormatError):
+            app.parse_workbook_rows([])
+        self.assertEqual(app.parse_workbook_rows([app.IMPORT_HEADERS]), [])
+        rows = app.parse_workbook_rows(
+            [
+                ["舰船名称", "是否已挂机", "是否已练级完成", "备注"],
+                ["武藏", "是", "否", "额外列忽略"],
+                ["", "", "", ""],
+                ["古鹰", "否", "是"],
+            ]
+        )
+        self.assertEqual([row["舰船名称"] for row in rows], ["武藏", "古鹰"])
+
+    def test_import_csv_returns_report_and_counts(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {"ship_type": "战列", "rarity": "海上传奇", "tech_points": []},
+                )
+            payload = app.csv_write(
+                [
+                    ["舰船名称", "是否已挂机", "是否已练级完成"],
+                    ["武藏", "是", "否"],
+                    ["不存在", "是", "否"],
+                ]
+            )
+            report_bytes, updated, skipped = app.import_csv(payload)
+            self.assertEqual((updated, skipped), (1, 1))
+            report = app.csv_read(report_bytes)
+            self.assertEqual(report[0], app.REPORT_HEADERS)
+            self.assertEqual(report[1][3], "处理完成")
+            self.assertEqual(report[2][3], "未匹配到数据跳过")
+            with app.get_connection() as connection:
+                ship = connection.execute(
+                    "SELECT is_idling, is_trained FROM ships WHERE name = '武藏'"
+                ).fetchone()
+                self.assertEqual((ship["is_idling"], ship["is_trained"]), (1, 0))
+
+    def test_import_template_is_csv(self):
+        data = app.import_template_bytes()
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(app.csv_read(data), [app.IMPORT_HEADERS])
 
     def test_import_process(self):
         with isolated_app_data():
@@ -1432,6 +1507,9 @@ class AppTests(unittest.TestCase):
         self.assertIn("recommend_ship_types", html)
         self.assertIn("function rowHasTargets(row) {", html)
         self.assertIn("所选舰种暂无可推荐舰娘", html)
+        # 默认仅展示需要练级且尚未练级完成的舰船，重置筛选后保持一致。
+        self.assertIn("needs_training: '是',", html)
+        self.assertIn("filterState.needs_training = '是';", html)
         # 全量导入完成后整页刷新（独立于局部回读的成功/失败）
         self.assertIn("function scheduleImportReload(objectUrl)", html)
         self.assertIn("setTimeout(() => window.location.reload(), 1200);", html)

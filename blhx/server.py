@@ -21,7 +21,13 @@ from .constants import (
     SHIP_TYPE_ORDER,
 )
 from .db import init_db
-from .excel import import_excel, import_template_bytes, parse_multipart_file
+from .excel import (
+    CSV_CONTENT_TYPE,
+    CsvFormatError,
+    import_csv,
+    import_template_bytes,
+    parse_multipart_file,
+)
 from .history import list_operations
 from .page import PAGE_HTML
 from .recommendations import available_next_ship_types, next_ship, next_ships_by_type
@@ -195,8 +201,8 @@ class TrackerHandler(BaseHTTPRequestHandler):
             elif path == "/api/template":
                 self.send_bytes(
                     import_template_bytes(),
-                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    filename="blhx-training-import-template.xlsx",
+                    content_type=CSV_CONTENT_TYPE,
+                    filename="blhx-training-import-template.csv",
                 )
             else:
                 self.send_error_json("Not Found", 404)
@@ -259,13 +265,17 @@ class TrackerHandler(BaseHTTPRequestHandler):
                     self.headers.get("Content-Type", ""), body
                 )
                 if uploaded is None:
-                    self.send_error_json("请上传 Excel 文件")
+                    self.send_error_json("请上传 CSV 文件")
                     return
-                report_bytes, updated_count, skipped_count = import_excel(uploaded.data)
+                try:
+                    report_bytes, updated_count, skipped_count = import_csv(uploaded.data)
+                except CsvFormatError as error:
+                    self.send_error_json(str(error), 400)
+                    return
                 self.send_bytes(
                     report_bytes,
-                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    filename="blhx-training-import-result.xlsx",
+                    content_type=CSV_CONTENT_TYPE,
+                    filename="blhx-training-import-result.csv",
                 )
             elif path == "/api/ship/status":
                 payload = self.read_json()

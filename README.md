@@ -11,7 +11,7 @@
     ↓ HTTP / JSON
 Python 标准库 HTTP Server
     ↓
-业务规则层（Wiki 同步、Excel 导入、推荐排序）
+业务规则层（Wiki 同步、CSV 导入、推荐排序）
     ↓
 SQLite 数据库
 ```
@@ -20,7 +20,7 @@ SQLite 数据库
 - 数据库：SQLite，默认位于 `DATA_DIR/blhx-training.sqlite3`；推荐配置保存在 `DATA_DIR/config.json`。
 - 前端：位于 `blhx/page.html` 的 HTML/CSS/JavaScript 页面，没有 Node.js 构建流程。
 - 外部数据源：碧蓝航线 Wiki 后端接口（MediaWiki revisions API 与 Semantic MediaWiki ask API）。
-- Excel：通过标准库 `zipfile` 和 `xml.etree.ElementTree` 读写 `.xlsx`，没有引入 `openpyxl`、`pandas` 等依赖。
+- CSV：通过标准库 `csv` 读写 UTF-8（带 BOM）`.csv`，Excel 与常见表格软件均可直接打开，没有引入额外依赖。
 - 部署：单容器 Docker 部署，宿主机 `./data` 目录挂载到容器 `/data`。
 
 ### 项目结构
@@ -39,13 +39,13 @@ SQLite 数据库
 │   ├── recommendations.py     # 单目标与按舰种分组推荐
 │   ├── config.py              # data/config.json 配置读写
 │   ├── wiki.py                # Wiki 抓取、解析与同步
-│   ├── excel.py               # Excel 读写与导入流程
+│   ├── excel.py               # CSV 读写与导入流程
 │   ├── page.py                # 前端页面加载
 │   ├── page.html              # 前端页面
 │   └── server.py              # HTTP 路由与服务入口
 ├── tests/
 │   ├── support.py             # 测试数据目录隔离
-│   └── test_app.py            # Wiki 解析、Excel 读写、筛选与导入测试
+│   └── test_app.py            # Wiki 解析、CSV 读写、筛选与导入测试
 ├── Dockerfile                 # Python 3.12-slim-bookworm 镜像
 ├── docker-compose.yml         # 拉取 Docker Hub 预构建镜像的部署配置
 ├── .github/workflows/         # GitHub Actions 自动构建与镜像推送
@@ -66,8 +66,8 @@ SQLite 数据库
 | `rarity` | 稀有度，例如海上传奇、决战方案、普通、稀有、精锐、超稀有、最高方案 |
 | `release_date` | 实装日期，格式 `YYYY-MM-DD` |
 | `needs_training` | 是否需要练级；Wiki 同步时根据是否有加成属性自动写入 |
-| `is_idling` | 是否已挂机；同步后为空，Excel 导入后写入 `0/1` |
-| `is_trained` | 是否已练级完成；同步后为空，Excel 导入后写入 `0/1` |
+| `is_idling` | 是否已挂机；同步后为空，CSV 导入后写入 `0/1` |
+| `is_trained` | 是否已练级完成；同步后为空，CSV 导入后写入 `0/1` |
 | `wiki_url` | 舰船 Wiki 页面地址 |
 | `created_at` / `updated_at` | UTC 时间戳 |
 
@@ -87,7 +87,7 @@ SQLite 数据库
 
 #### `operation_logs`
 
-记录状态更新、删除、清空和 Excel 导入等操作。`created_at` 使用带毫秒精度的 UTC 时间戳。单舰删除会通过外键级联删除关联 `tech_points`；“清空数据”会清空 `ships`、`tech_points`、`operation_logs`、`sqlite_sequence` 以及 `DATA_DIR/config.json`。
+记录状态更新、删除、清空和 CSV 导入等操作。`created_at` 使用带毫秒精度的 UTC 时间戳。单舰删除会通过外键级联删除关联 `tech_points`；“清空数据”会清空 `ships`、`tech_points`、`operation_logs`、`sqlite_sequence` 以及 `DATA_DIR/config.json`。
 
 ## 开发环境
 
@@ -164,7 +164,7 @@ DATA_DIR/blhx-training.sqlite3
 4. 对新舰船以 `WIKI_CONCURRENCY` 个线程并发请求 `action=query` 的 revision wikitext；全局仍按 `WIKI_REQUEST_INTERVAL` 控制请求节奏。
 5. 解析舰种、稀有度，以及解锁图鉴和达到120级对应的加成属性。
 6. 将舰船与多条加成记录写入 SQLite。
-7. `is_idling`、`is_trained` 初始为空，留给 Excel 导入或后续功能更新。
+7. `is_idling`、`is_trained` 初始为空，留给 CSV 导入或后续功能更新。
 
 加成属性解析自以下 Wiki 字段：
 
@@ -179,7 +179,7 @@ DATA_DIR/blhx-training.sqlite3
 
 少量同步复用上述抓取和解析流程。点击“少量同步”后输入一个或多个舰娘名称；同步前会通过 Wiki 后端接口精确匹配名称，因此也支持数据库中尚不存在的舰娘。匹配成功后只同步这些舰娘，并覆盖对应的 Wiki 字段和加成记录。
 
-### 2. Excel 批量导入
+### 2. CSV 批量导入
 
 导入模板列：
 
@@ -194,7 +194,7 @@ DATA_DIR/blhx-training.sqlite3
 - 按舰船名称精确匹配数据库记录。
 - 未匹配到的记录跳过，并在结果表中标注“未匹配到数据跳过”。
 - 状态列只接受 `是` 或 `否`，其他值跳过。
-- 处理完成后返回一个 `.xlsx` 结果文件，包含原值、处理状态和处理说明。
+- 处理完成后返回一个 `.csv` 结果文件，包含原值、处理状态和处理说明。
 - 服务端不会把导入文件或结果文件永久写入磁盘，结果通过 HTTP 响应下载。
 - 导入完成后页面会先下载结果文件，再整页刷新，避免前端残留筛选状态或缓存数据造成显示遗漏。
 
@@ -343,8 +343,8 @@ GET /api/ships
 | `GET` | `/api/operations` | 查询操作历史 |
 | `POST` | `/api/sync` | 启动 Wiki 同步 |
 | `GET` | `/api/sync/status` | 查询同步进度 |
-| `GET` | `/api/template` | 下载 Excel 导入模板 |
-| `POST` | `/api/import` | 上传 Excel 并返回处理结果 Excel |
+| `GET` | `/api/template` | 下载 CSV 导入模板 |
+| `POST` | `/api/import` | 上传 CSV 并返回处理结果 CSV |
 | `POST` | `/api/ship/status` | 更新单舰已挂机或已练级状态 |
 | `POST` | `/api/ship/clear-status` | 清除单舰已挂机与已练级状态 |
 | `POST` | `/api/ship/delete` | 删除单舰及其加成记录 |
@@ -358,9 +358,9 @@ Web 页面筛选：
 - 推荐舰种点选即保存、取消即删除，配置保存在 `data/config.json` 的 `next_ship_types`；可选舰种仅包含仍存在可练级舰娘的类型。
 - 每个舰种的挂机/练级目标数量保存在 `target_limits`，手动录入舰娘保存在 `manual_targets`。
 - 推荐结果按舰种逐行展示挂机与练级目标，并提供“挂机完成”“练级完成”快捷按钮；操作后自动刷新表格与推荐数据。
-- 页面顶部提供“操作历史”弹窗，记录状态更新、删除、清空和 Excel 导入等操作内容与毫秒级时间点。
+- 页面顶部提供“操作历史”弹窗，记录状态更新、删除、清空和 CSV 导入等操作内容与毫秒级时间点。
 - 舰船名称输入后自动模糊查询。
-- 页面默认选中“已练级完成 = 否”。
+- 页面默认选中“需要练级 = 是”和“已练级完成 = 否”。
 - 列表默认按实装日期升序排列。
 - 页面顶部提供“少量同步”按钮，点击后可输入一个或多个舰娘名称启动同步。
 - 页面顶部提供“全量同步”按钮，点击后需要通过网页内弹窗二次确认才会发起同步。
@@ -478,6 +478,6 @@ docker compose up -d
 - 当前应用没有 `requirements.txt`，因为只使用 Python 标准库。
 - 测试必须使用 `tests/support.py` 的 `isolated_app_data()` 隔离数据目录，禁止读写正式 `data/` 目录。
 - 修改 Wiki 解析逻辑时，优先补充或调整 `tests/test_app.py` 中的样例数据。
-- 修改 Excel 逻辑时，注意保持模板列名完全一致。
+- 修改 CSV 逻辑时，注意保持模板列名完全一致；文件使用 UTF-8 BOM 编码，导入时同时兼容 UTF-8 与 GB18030。
 - SQLite 文件和运行数据目录不要提交到 Git。
 - `.gitignore` 已覆盖 Python 缓存、虚拟环境、测试缓存、SQLite 数据、日志和常见本地产物。

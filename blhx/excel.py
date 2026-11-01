@@ -1,212 +1,90 @@
 from __future__ import annotations
 
+import csv
+import io
 import re
-import zipfile
 from dataclasses import dataclass
-from io import BytesIO
-from typing import Any
 from urllib.parse import unquote
-from xml.etree import ElementTree
 
 from .db import get_connection, init_db
 from .history import record_operation
 from .utils import utc_now_text
 
+CSV_ENCODING = "utf-8-sig"
+CSV_CONTENT_TYPE = "text/csv; charset=utf-8"
 
-def column_index_from_ref(cell_ref: str) -> int:
-    letters = re.match(r"[A-Z]+", cell_ref.upper())
-    if not letters:
-        return 1
-    result = 0
-    for character in letters.group():
-        result = result * 26 + ord(character) - ord("A") + 1
-    return result
+IMPORT_HEADERS = ["舰船名称", "是否已挂机", "是否已练级完成"]
+REPORT_HEADERS = ["舰船名称", "是否已挂机", "是否已练级完成", "处理状态", "处理说明"]
 
 
-def local_name(element: ElementTree.Element) -> str:
-    return element.tag.rsplit("}", 1)[-1]
+class CsvFormatError(ValueError):
+    """CSV 编码或语法不合法，调用方应作为用户输入错误返回。"""
 
 
-def read_shared_strings(archive: zipfile.ZipFile) -> list[str]:
-    if "xl/sharedStrings.xml" not in archive.namelist():
-        return []
-    root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
-    shared_strings: list[str] = []
-    for item in root:
-        shared_strings.append(
-            "".join(
-                node.text or ""
-                for node in item.iter()
-                if local_name(node) == "t"
-            )
-        )
-    return shared_strings
-
-
-def cell_text(
-    cell: ElementTree.Element, shared_strings: list[str]
-) -> str:
-    value_node = next(
-        (node for node in cell if local_name(node) == "v"), None
-    )
-    if cell.attrib.get("t") == "inlineStr":
-        return "".join(
-            node.text or ""
-            for node in cell.iter()
-            if local_name(node) == "t"
-        )
-    if value_node is None:
-        return ""
-    value = value_node.text or ""
-    if cell.attrib.get("t") == "s":
+def decode_csv_text(data: bytes) -> str:
+    for encoding in (CSV_ENCODING, "utf-8", "gb18030"):
         try:
-            return shared_strings[int(value)]
-        except (ValueError, IndexError):
-            return ""
-    return value
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise CsvFormatError("CSV 文件编码无法识别，请使用 UTF-8 或 GB18030 编码")
 
 
-def xlsx_read(data: bytes) -> list[list[str]]:
-    with zipfile.ZipFile(BytesIO(data)) as archive:
-        sheet_names = sorted(
-            name
-            for name in archive.namelist()
-            if name.startswith("xl/worksheets/")
-            and name.endswith(".xml")
-        )
-        if not sheet_names:
-            return []
-        shared_strings = read_shared_strings(archive)
-        root = ElementTree.fromstring(archive.read(sheet_names[0]))
-        rows: list[list[str]] = []
-        for row_node in root.iter():
-            if local_name(row_node) != "row":
-                continue
-            values: list[str] = []
-            for cell_node in row_node:
-                if local_name(cell_node) != "c":
-                    continue
-                cell_ref = cell_node.attrib.get("r", "")
-                column_index = (
-                    column_index_from_ref(cell_ref) if cell_ref else len(values)
-                )
-                while len(values) < column_index:
-                    values.append("")
-                values[column_index - 1] = cell_text(cell_node, shared_strings)
-            rows.append(values)
-        return rows
+def csv_read(data: bytes) -> list[list[str]]:
+    text = decode_csv_text(data).lstrip("\ufeff")
+    if not text.strip():
+        return []
+    try:
+        rows = csv.reader(io.StringIO(text, newline=""), strict=True)
+        return [
+            [str(value).strip() for value in row]
+            for row in rows
+        ]
+    except csv.Error as error:
+        raise CsvFormatError(f"CSV 格式错误：{error}") from error
 
 
-def xml_escape(value: Any) -> str:
-    return (
-        str(value)
-        .replace(chr(38), chr(38) + "amp;")
-        .replace("<", chr(38) + "lt;")
-        .replace(">", chr(38) + "gt;")
-        .replace('"', chr(38) + "quot;")
+def csv_line(values: list[Any]) -> str:
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="\r\n").writerow(
+        ["" if value is None else value for value in values]
     )
+    return buffer.getvalue()
 
 
-def cell_reference(row_index: int, column_index: int) -> str:
-    letters = ""
-    while column_index:
-        column_index, remainder = divmod(column_index - 1, 26)
-        letters = chr(remainder + ord("A")) + letters
-    return f"{letters}{row_index}"
-
-
-def xlsx_write(
-    rows: list[list[Any]],
-    sheet_name: str = "Sheet1",
-    column_widths: list[float] | None = None,
-) -> bytes:
-    output = BytesIO()
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "[Content_Types].xml",
-            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-</Types>""",
-        )
-        archive.writestr(
-            "_rels/.rels",
-            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships" Target="officeDocument"/>
-</Relationships>""",
-        )
-        archive.writestr(
-            "xl/workbook.xml",
-            f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets><sheet name="{xml_escape(sheet_name)}" sheetId="1" r:id="rId1"/></sheets>
-</workbook>""",
-        )
-        archive.writestr(
-            "xl/_rels/workbook.xml.rels",
-            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="sheet1.xml"/>
-</Relationships>""",
-        )
-
-        row_xml: list[str] = []
-        for row_index, row in enumerate(rows, start=1):
-            cell_xml: list[str] = []
-            for column_index, value in enumerate(row, start=1):
-                reference = cell_reference(row_index, column_index)
-                if value is None or value == "":
-                    cell_xml.append(f'<c r="{reference}"/>')
-                elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                    cell_xml.append(
-                        f'<c r="{reference}" t="n"><v>{xml_escape(value)}</v></c>'
-                    )
-                else:
-                    cell_xml.append(
-                        f'<c r="{reference}" t="inlineStr"><is><t xml:space="preserve">{xml_escape(value)}</t></is></c>'
-                    )
-            row_xml.append(
-                f'<row r="{row_index}">{"".join(cell_xml)}</row>'
-            )
-
-        column_xml = ""
-        if column_widths:
-            column_xml = "<cols>" + "".join(
-                f'<col min="{index}" max="{index}" width="{width}" customWidth="1"/>'
-                for index, width in enumerate(column_widths, start=1)
-            ) + "</cols>"
-        archive.writestr(
-            "xl/worksheets/sheet1.xml",
-            f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-{column_xml}<sheetData>{"".join(row_xml)}</sheetData>
-</worksheet>""",
-        )
-    return output.getvalue()
+def csv_write(rows: list[list[Any]]) -> bytes:
+    text = "".join(csv_line(row) for row in rows)
+    return text.encode(CSV_ENCODING)
 
 
 def import_template_bytes() -> bytes:
-    headers = ["舰船名称", "是否已挂机", "是否已练级完成"]
-    return xlsx_write(
-        [headers],
-        "导入模板",
-        [24, 16, 20],
-    )
+    return csv_write([list(IMPORT_HEADERS)])
 
 
 def parse_workbook_rows(rows: list[list[str]]) -> list[dict[str, str]]:
     if not rows:
-        raise ValueError("Excel 文件为空")
+        raise CsvFormatError("CSV 文件为空")
     headers = [str(value).strip() for value in rows[0]]
-    required_headers = {"舰船名称", "是否已挂机", "是否已练级完成"}
-    if not required_headers.issubset(set(headers)):
-        raise ValueError("Excel 第一行必须包含：舰船名称、是否已挂机、是否已练级完成")
+    required_headers = set(IMPORT_HEADERS)
+    seen: set[str] = set()
+    duplicates = []
+    for header in headers:
+        if not header:
+            continue
+        if header in seen and header not in duplicates:
+            duplicates.append(header)
+        seen.add(header)
+    if duplicates:
+        raise CsvFormatError(
+            "CSV 第一行存在重复列名：" + "、".join(duplicates)
+        )
+    if not required_headers.issubset(seen):
+        raise CsvFormatError("CSV 第一行必须包含：舰船名称、是否已挂机、是否已练级完成")
 
     parsed_rows: list[dict[str, str]] = []
     for row in rows[1:]:
+        if not any(str(value).strip() for value in row):
+            continue
         item = {
             header: str(row[index]).strip() if index < len(row) else ""
             for index, header in enumerate(headers)
@@ -267,7 +145,7 @@ def process_import_rows(
                 record_operation(
                     connection,
                     "import_status",
-                    f"Excel 导入状态：已挂机={idling_value}，已练级完成={trained_value}",
+                    f"CSV 导入状态：已挂机={idling_value}，已练级完成={trained_value}",
                     ship_id=ship["id"],
                     ship_name=ship["name"],
                     ship_type=ship["ship_type"],
@@ -291,30 +169,13 @@ def process_import_rows(
     return report_rows, updated_count, skipped_count
 
 
-def import_excel(data: bytes) -> tuple[bytes, int, int]:
-    rows = parse_workbook_rows(xlsx_read(data))
+def import_csv(data: bytes) -> tuple[bytes, int, int]:
+    rows = parse_workbook_rows(csv_read(data))
     report_rows, updated_count, skipped_count = process_import_rows(rows)
-    report = [
-        [
-            "舰船名称",
-            "是否已挂机",
-            "是否已练级完成",
-            "处理状态",
-            "处理说明",
-        ]
-    ]
+    report: list[list[str]] = [list(REPORT_HEADERS)]
     for row in report_rows:
-        report.append(
-            [
-                row["舰船名称"],
-                row["是否已挂机"],
-                row["是否已练级完成"],
-                row["处理状态"],
-                row["处理说明"],
-            ]
-        )
-    report_bytes = xlsx_write(report, "导入结果", [24, 16, 20, 22, 34])
-    return report_bytes, updated_count, skipped_count
+        report.append([row[header] for header in REPORT_HEADERS])
+    return csv_write(report), updated_count, skipped_count
 
 
 @dataclass
@@ -356,7 +217,9 @@ def parse_multipart_file(content_type: str, body: bytes) -> UploadedFile | None:
             ),
             "",
         )
-        filename_match = re.search(r'filename\*?=(?:"([^"]*)"|([^;\r\n]+))', disposition, re.IGNORECASE)
+        filename_match = re.search(
+            r'filename\*?=(?:"([^"]*)"|([^;\r\n]+))', disposition, re.IGNORECASE
+        )
         if not filename_match:
             continue
         filename = (filename_match.group(1) or filename_match.group(2)).strip()

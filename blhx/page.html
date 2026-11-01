@@ -265,16 +265,16 @@
     <header>
       <div>
         <h1>碧蓝航线练级数据记录</h1>
-        <div class="subtitle">全量同步 · Excel 导入 · 挂机与练级排序</div>
+        <div class="subtitle">全量同步 · CSV 导入 · 挂机与练级排序</div>
       </div>
       <div class="toolbar">
         <button id="syncButton" class="primary" onclick="requestFullSync()">全量同步</button>
         <button id="partialSyncButton" onclick="startBulkSync()">少量同步</button>
         <a class="button" href="/api/template">下载导入模板</a>
-        <button onclick="document.getElementById('importFile').click()">导入 Excel</button>
+        <button onclick="document.getElementById('importFile').click()">导入 CSV</button>
         <button onclick="openHistoryModal()">操作历史</button>
         <button id="clearDataButton" class="danger" onclick="requestClearShips()">清空数据</button>
-        <input id="importFile" type="file" accept=".xlsx" style="display:none" onchange="importExcel(this)">
+        <input id="importFile" type="file" accept=".csv,text/csv" style="display:none" onchange="importCsv(this)">
       </div>
     </header>
 
@@ -328,7 +328,7 @@
       rarity: '',
       bonus_ship_type: '',
       bonus_attribute: '',
-      needs_training: '',
+      needs_training: '是',
       is_idling: '',
       is_trained: '否'
     };
@@ -1023,7 +1023,7 @@
       if (result.running) showSyncOverlay();
     }
 
-    async function importExcel(input) {
+    async function importCsv(input) {
       const file = input.files[0];
       if (!file) return;
       const form = new FormData();
@@ -1040,10 +1040,10 @@
         const link = document.createElement('a');
         objectUrl = URL.createObjectURL(blob);
         link.href = objectUrl;
-        link.download = '导入处理结果.xlsx';
+        link.download = '导入处理结果.csv';
         link.click();
         imported = true;
-        showMessage('Excel 处理完成，已下载处理结果');
+        showMessage('CSV 处理完成，已下载处理结果');
         showToast('导入完成，页面即将自动刷新');
       } catch (error) {
         showMessage(error.message, true);
@@ -1074,7 +1074,7 @@
       filterState.rarity = '';
       filterState.bonus_ship_type = '';
       filterState.bonus_attribute = '';
-      filterState.needs_training = '';
+      filterState.needs_training = '是';
       filterState.is_idling = '';
       filterState.is_trained = '否';
       document.getElementById('fName').value = '';

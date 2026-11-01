@@ -1,4 +1,4 @@
-// 从 page.html 抽取真实 importExcel / scheduleImportReload 实现，验证：
+// 从 page.html 抽取真实 importCsv / scheduleImportReload 实现，验证：
 // 1) 下载点击发生在整页刷新之前；2) 成功导入恰好刷新一次；
 // 3) 局部回读（loadShips / refreshNextOptions）失败时仍会刷新；
 // 4) 导入失败时不刷新。
@@ -26,7 +26,7 @@ function extract(name) {
   throw new Error(`${name} 括号不匹配`);
 }
 
-const source = `${extract("importExcel")}\n${extract("scheduleImportReload")}\nreturn { importExcel, scheduleImportReload };`;
+const source = `${extract("importCsv")}\n${extract("scheduleImportReload")}\nreturn { importCsv, scheduleImportReload };`;
 
 function createHarness({ failReadback = false, failImport = false } = {}) {
   const events = [];
@@ -77,7 +77,7 @@ function check(label, condition) {
 // 场景1：正常成功
 {
   const { api, events, timers } = createHarness();
-  await api.importExcel({ files: [{ name: "a.xlsx" }], value: "a.xlsx" });
+  await api.importCsv({ files: [{ name: "a.csv" }], value: "a.csv" });
   flushTimers(timers);
   const downloads = events.filter(e => e.type === "download").length;
   const reloads = events.filter(e => e.type === "reload").length;
@@ -92,7 +92,7 @@ function check(label, condition) {
 // 场景2：局部回读失败，仍必须刷新
 {
   const { api, events, timers } = createHarness({ failReadback: true });
-  await api.importExcel({ files: [{ name: "a.xlsx" }], value: "a.xlsx" });
+  await api.importCsv({ files: [{ name: "a.csv" }], value: "a.csv" });
   flushTimers(timers);
   check("回读失败仍刷新一次", events.filter(e => e.type === "reload").length === 1);
 }
@@ -100,7 +100,7 @@ function check(label, condition) {
 // 场景3：导入失败，不得刷新
 {
   const { api, events, timers } = createHarness({ failImport: true });
-  await api.importExcel({ files: [{ name: "a.xlsx" }], value: "a.xlsx" });
+  await api.importCsv({ files: [{ name: "a.csv" }], value: "a.csv" });
   flushTimers(timers);
   check("导入失败不刷新", events.filter(e => e.type === "reload").length === 0);
   check("导入失败不下载", events.filter(e => e.type === "download").length === 0);
