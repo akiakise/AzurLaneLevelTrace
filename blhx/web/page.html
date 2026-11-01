@@ -298,7 +298,7 @@
       <div id="message" class="status-line"></div>
       <div class="table-scroll">
         <table class="ships-table">
-          <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>是否已练级完成</th><th>操作</th></tr></thead>
+          <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>已练级</th><th>操作</th></tr></thead>
           <tbody id="shipTable"><tr><td colspan="10" class="empty">加载中...</td></tr></tbody>
         </table>
       </div>
@@ -416,7 +416,7 @@
           <td data-label="实装日期">${escapeHtml(ship.release_date || '')}</td>
           <td data-label="是否需要练级" class="${ship.needs_training ? 'yes' : 'empty'}">${ship.needs_training ? '是' : '否'}</td>
           <td data-label="是否已挂机" class="${statusClass(ship.is_idling)}">${statusText(ship.is_idling)}</td>
-          <td data-label="是否已练级完成" class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
+          <td data-label="已练级" class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
           <td data-label="操作"><div class="row-actions">${actionButtons.join('')}</div></td>
         </tr>`;
       }).join('');
@@ -545,7 +545,7 @@
         { key: 'bonus_attribute', label: '加成属性', options: ['', ...filterOptions.bonusAttributes] },
         { key: 'needs_training', label: '需要练级', options: ['', '是', '否'] },
         { key: 'is_idling', label: '已挂机', options: ['', '是', '否'] },
-        { key: 'is_trained', label: '已练级完成', options: ['', '是', '否'] }
+        { key: 'is_trained', label: '已练级', options: ['', '是', '否'] }
       ];
       document.getElementById('filterGroups').innerHTML = groups.map(group => `
         <div class="chip-group">

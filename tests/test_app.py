@@ -1674,7 +1674,7 @@ class AppTests(unittest.TestCase):
         self.assertIn(".ships-table td[colspan]", html)
         self.assertIn('.next-table thead { display:none; }', html)
         # 每个数据单元格都带移动端标签，卡片布局才有维度名称。
-        for label in ("舰船名称", "舰种", "稀有度", "获得", "120级", "实装日期", "是否需要练级", "是否已挂机", "是否已练级完成", "操作", "挂机目标", "练级目标"):
+        for label in ("舰船名称", "舰种", "稀有度", "获得", "120级", "实装日期", "是否需要练级", "是否已挂机", "已练级", "操作", "挂机目标", "练级目标"):
             self.assertIn(f'data-label="{label}"', html)
         self.assertIn('env(safe-area-inset-bottom)', html)
 
