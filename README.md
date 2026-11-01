@@ -459,29 +459,27 @@ docker compose exec blhx-training python -c "import app; print(app.APP_VERSION)"
 curl -s http://localhost:8000/api/version
 ```
 
-### 自动构建与镜像推送
+### 版本、自动构建与 GitHub Release
 
-仓库推送到 `main` 后，GitHub Actions 会自动升级版本号、构建镜像并推送到 Docker Hub，工作流文件为 `.github/workflows/docker-publish.yml`。每次发布同时推送版本标签与 `latest`，不再推送 sha 标签：
+版本号唯一来源是仓库根目录的 `VERSION` 文件，格式为 `<major>.<minor>.<patch>`，由本地手动修改；工作流不修改、不提交 `VERSION`。应用通过 `/api/version` 和页面标题下方的 `v<版本>` 展示该值，容器启动时的 `Server` 响应头也使用它。
 
-```text
-akise/azur-lane-level-trace:latest
-akise/azur-lane-level-trace:<major>.<minor>.<patch>
-```
+发版步骤：
 
-版本号唯一来源是仓库根目录的 `VERSION` 文件，应用通过 `/api/version` 和页面标题下方的 `v<版本>` 展示，容器启动时 `Server` 响应头也使用该版本。
+1. 本地修改 `VERSION`，例如 `1.0.0` → `1.0.1`。
+2. 提交并推送到 `main`。
+3. GitHub Actions 读取 `VERSION` 构建 `linux/amd64,linux/arm64` 多架构镜像，推送 `akise/azur-lane-level-trace:latest` 与 `akise/azur-lane-level-trace:<VERSION>` 两个标签。
+4. 同时创建 Git 标签 `v<VERSION>` 与同名 GitHub Release，Release 说明自动按提交记录生成。
 
-发布流程：
+工作流文件为 `.github/workflows/docker-publish.yml`。若 `v<VERSION>` 的 Release 已存在，说明本次推送没有改版本，工作流会自动跳过，不会覆盖已有镜像和 Release；需要重新发布同一版本时，在 Actions 页面手动触发 `workflow_dispatch` 并勾选 `force`。
 
-1. 推送到 `main` 触发工作流，读取 `VERSION` 并按 patch 段 `+1`（如 `1.0.3` → `1.0.4`）。
-2. 以 `chore(release): v<版本>` 提交并推送回 `main`；该提交再次触发工作流时会被识别并跳过，避免重复升版。
-3. 用升版后的提交构建 `linux/amd64,linux/arm64` 多架构镜像，推送 `<版本>` 与 `latest` 两个标签。
-
-手动触发 `workflow_dispatch` 时不升版，按当前 `VERSION` 重新构建并推送镜像，适合重发失败发布或用例验证。需要指定大/小版本时，直接修改 `VERSION` 并推送 `main`，patch 会在其基础上继续自增。
+镜像标签只保留 `<VERSION>` 与 `latest`，不再推送 sha 标签。版本号不合法的推送会直接失败，不会产出镜像。
 
 首次使用前，在 Docker Hub 创建公开仓库 `azur-lane-level-trace`，并在 GitHub 仓库的 `Settings > Secrets and variables > Actions` 中添加：
 
 - `DOCKERHUB_USERNAME`：Docker Hub 用户名 `akise`。
 - `DOCKERHUB_TOKEN`：Docker Hub 账号设置中创建的 Access Token，权限选择 `Read & Write`。
+
+GitHub Release 使用工作流内置的 `GITHUB_TOKEN`，需要仓库 `Settings > Actions > General > Workflow permissions` 允许读写，工作流已声明 `contents: write`。
 
 私有 Docker Hub 仓库需要先在服务器登录：
 
