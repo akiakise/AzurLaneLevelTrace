@@ -1,7 +1,9 @@
+"""兼容入口：实现已迁移到 blhx.web.page。"""
+
 from __future__ import annotations
 
-from pathlib import Path
+import sys
 
+from .web import page as _module
 
-PAGE_HTML = (Path(__file__).with_name("page.html")).read_text(encoding="utf-8")
-
+sys.modules[__name__] = _module

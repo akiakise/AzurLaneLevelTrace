@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>碧蓝航线练级数据记录</title>
+  <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="apple-touch-icon" href="/icon.png">
   <style>
     :root { color-scheme: dark; --bg:#0f172a; --panel:#16213c; --panel2:#1e293b; --line:#2f3f5d; --text:#e6edf7; --muted:#9db0c9; --blue:#38bdf8; --green:#4ade80; --red:#f87171; }
     * { box-sizing:border-box; }
@@ -180,11 +182,12 @@
       <div class="progress-track"><div id="syncProgressBar" class="progress-fill"></div></div>
       <div id="syncCount" class="sync-count">0 / 0</div>
       <div class="sync-stats">
-        <div class="sync-stat"><div class="sync-stat-label">新增</div><div id="syncProcessed" class="sync-stat-value">0</div></div>
+        <div class="sync-stat"><div id="syncProcessedLabel" class="sync-stat-label">新增</div><div id="syncProcessed" class="sync-stat-value">0</div></div>
         <div class="sync-stat"><div class="sync-stat-label">跳过</div><div id="syncSkipped" class="sync-stat-value">0</div></div>
         <div class="sync-stat"><div class="sync-stat-label">错误</div><div id="syncErrorCount" class="sync-stat-value">0</div></div>
       </div>
       <ul id="syncErrors" class="sync-errors" hidden></ul>
+      <button id="syncDownload" class="sync-close" hidden onclick="downloadImportResult()">下载导入结果</button>
       <button id="syncClose" class="sync-close" disabled onclick="closeSyncOverlay()">关闭</button>
     </div>
   </div>
@@ -271,7 +274,7 @@
         <button id="syncButton" class="primary" onclick="requestFullSync()">全量同步</button>
         <button id="partialSyncButton" onclick="startBulkSync()">少量同步</button>
         <a class="button" href="/api/template">下载导入模板</a>
-        <button onclick="document.getElementById('importFile').click()">导入 CSV</button>
+        <button id="importButton" onclick="document.getElementById('importFile').click()">导入 CSV</button>
         <button onclick="openHistoryModal()">操作历史</button>
         <button id="clearDataButton" class="danger" onclick="requestClearShips()">清空数据</button>
         <input id="importFile" type="file" accept=".csv,text/csv" style="display:none" onchange="importCsv(this)">
@@ -940,7 +943,7 @@
     async function refreshSyncStatus() {
       try {
         const result = await requestJson('/api/sync/status');
-        updateSyncModal(result);
+        updateSyncModal({ ...result, mode: 'sync' });
         if (result.running) {
           setTimeout(refreshSyncStatus, 1000);
           return;
@@ -1001,6 +1004,12 @@
     }
 
     function updateSyncModal(result) {
+      const importing = result.mode === 'import';
+      setSyncModalMode(importing ? 'import' : 'sync');
+      if (importing) {
+        document.getElementById('syncDownload').disabled =
+          result.running || result.status !== '完成' || importDownloadDone;
+      }
       const completed = result.processed + result.skipped + result.errors.length;
       const percent = result.total
         ? Math.round(completed / result.total * 100)
@@ -1019,6 +1028,7 @@
       document.getElementById('syncClose').disabled = result.running;
       document.getElementById('syncButton').disabled = result.running;
       document.getElementById('partialSyncButton').disabled = result.running;
+      document.getElementById('importButton').disabled = result.running;
       document.body.classList.toggle('loading', result.running);
       if (result.running) showSyncOverlay();
     }
@@ -1028,43 +1038,103 @@
       if (!file) return;
       const form = new FormData();
       form.append('file', file);
-      let imported = false;
-      let objectUrl = '';
+      showImportOverlay();
+      document.body.classList.add('loading');
+      document.getElementById('importButton').disabled = true;
+      document.getElementById('syncButton').disabled = true;
+      document.getElementById('partialSyncButton').disabled = true;
       try {
         const response = await fetch('/api/import', { method: 'POST', body: form });
+        const result = await response.json().catch(() => ({}));
         if (!response.ok) {
-          const result = await response.json().catch(() => ({}));
           throw new Error(result.error || response.statusText);
         }
-        const blob = await response.blob();
-        const link = document.createElement('a');
-        objectUrl = URL.createObjectURL(blob);
-        link.href = objectUrl;
-        link.download = '导入处理结果.csv';
-        link.click();
-        imported = true;
-        showMessage('CSV 处理完成，已下载处理结果');
-        showToast('导入完成，页面即将自动刷新');
+        showMessage('CSV 导入已启动');
+        updateSyncModal({ ...result.status, mode: 'import' });
+        refreshImportStatus();
       } catch (error) {
+        finishImportInteraction();
+        closeSyncOverlay();
         showMessage(error.message, true);
       } finally {
         input.value = '';
       }
-      if (!imported) return;
-      // 服务端已完成写入，后续局部回读失败也不能影响整页刷新。
-      scheduleImportReload(objectUrl);
+    }
+
+    function showImportOverlay() {
+      importDownloadDone = false;
+      setSyncModalMode('import');
+      document.getElementById('syncMessage').textContent = '正在读取 CSV 文件';
+      document.getElementById('syncPercent').textContent = '0%';
+      document.getElementById('syncProgressBar').style.width = '0%';
+      document.getElementById('syncCount').textContent = '0 / 0';
+      document.getElementById('syncProcessed').textContent = '0';
+      document.getElementById('syncSkipped').textContent = '0';
+      document.getElementById('syncErrorCount').textContent = '0';
+      document.getElementById('syncErrors').innerHTML = '';
+      document.getElementById('syncErrors').hidden = true;
+      document.getElementById('syncDownload').hidden = true;
+      document.getElementById('syncClose').disabled = true;
+      document.getElementById('syncSpinner').hidden = false;
+      showSyncOverlay();
+    }
+
+    function setSyncModalMode(mode) {
+      const importing = mode === 'import';
+      document.getElementById('syncTitle').textContent = importing ? '导入进度' : '同步进度';
+      document.getElementById('syncProcessedLabel').textContent = importing ? '更新' : '新增';
+      const download = document.getElementById('syncDownload');
+      download.hidden = !importing;
+      download.disabled = importing;
+    }
+
+    function finishImportInteraction() {
+      document.body.classList.remove('loading');
+      document.getElementById('importButton').disabled = false;
+      document.getElementById('syncButton').disabled = false;
+      document.getElementById('partialSyncButton').disabled = false;
+    }
+
+    async function refreshImportStatus() {
       try {
-        await loadShips();
-        await refreshNextOptions(true);
+        const result = await requestJson('/api/import/status');
+        updateSyncModal({ ...result, mode: 'import' });
+        if (result.running) {
+          setTimeout(refreshImportStatus, 400);
+          return;
+        }
+        if (result.status === '完成') {
+          showToast('导入完成，正在下载处理结果');
+          downloadImportResult();
+        } else {
+          finishImportInteraction();
+        }
       } catch (error) {
+        finishImportInteraction();
         showMessage(error.message, true);
+        closeSyncOverlay();
       }
     }
 
-    function scheduleImportReload(objectUrl) {
-      // 全量导入后整页刷新，避免前端残留状态与数据库不一致。
-      // 稍等再回收对象 URL 并刷新，避免结果文件下载被中断。
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 3000);
+    let importDownloadDone = false;
+
+    function downloadImportResult() {
+      if (importDownloadDone) return;
+      if (document.getElementById('syncDownload').disabled) return;
+      importDownloadDone = true;
+      document.getElementById('syncDownload').disabled = true;
+      const link = document.createElement('a');
+      link.href = '/api/import/result';
+      link.download = '导入处理结果.csv';
+      link.click();
+      scheduleImportReload();
+    }
+
+    function scheduleImportReload() {
+      // 导入完成后整页刷新，避免前端残留筛选状态与数据库不一致。
+      // 刷新窗口内保持按钮禁用，避免启动新任务后被旧定时器刷新打断。
+      // 稍等再刷新，避免结果文件下载被中断。
+      document.body.classList.add('loading');
       setTimeout(() => window.location.reload(), 1200);
     }
 

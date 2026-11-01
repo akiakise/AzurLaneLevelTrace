@@ -1,13 +1,9 @@
+"""兼容入口：实现已迁移到 blhx.core.utils。"""
+
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
+import sys
 
+from .core import utils as _module
 
-def utc_now_text() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-
-
-def clean_template_value(value: str) -> str:
-    return re.sub(r"\\?<!--.*?-->", "", value, flags=re.DOTALL).strip()
-
+sys.modules[__name__] = _module

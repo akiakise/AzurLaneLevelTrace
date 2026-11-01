@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from blhx import config, db, wiki
 
-from blhx.config import (
+from blhx.storage.config import (
     DEFAULT_TARGET_LIMIT,
     MANUAL_TARGET_FIELDS,
     MAX_TARGET_LIMIT,
@@ -15,7 +15,7 @@ from blhx.config import (
     toggle_manual_target,
     write_config,
 )
-from blhx.constants import (
+from blhx.core.constants import (
     BASE_DIR,
     BONUS_ATTRIBUTE_ORDER,
     BONUS_SHIP_TYPE_ORDER,
@@ -39,33 +39,38 @@ from blhx.constants import (
     WIKI_RETRY_COUNT,
     WIKI_RETRY_DELAY,
 )
-from blhx.db import get_connection, init_db
-from blhx.excel import (
+from blhx.storage.db import get_connection, init_db
+from blhx.transfer.csv_io import (
     CSV_CONTENT_TYPE,
     CsvFormatError,
     IMPORT_HEADERS,
     REPORT_HEADERS,
     UploadedFile,
+    build_import_report,
     csv_read,
     csv_write,
     import_csv,
+    import_result_bytes,
+    import_status_snapshot,
     import_template_bytes,
     parse_multipart_file,
     parse_workbook_rows,
     process_import_rows,
+    reset_import_state,
+    start_import,
 )
-from blhx.history import list_operations, record_operation
-from blhx.page import PAGE_HTML
-from blhx.recommendations import (
+from blhx.storage.history import list_operations, record_operation
+from blhx.web.page import PAGE_HTML
+from blhx.domain.recommendations import (
     available_next_ship_types,
     next_ship,
     next_ships_by_type,
     rarity_rank,
     tech_priority_rank,
 )
-from blhx.server import TrackerHandler, main
-from blhx.constants import recommend_ship_type_sort_key
-from blhx.ships import (
+from blhx.web.server import TrackerHandler, main
+from blhx.core.constants import recommend_ship_type_sort_key
+from blhx.domain.ships import (
     clear_ship_statuses,
     clear_ships,
     delete_ship,
@@ -77,16 +82,16 @@ from blhx.ships import (
     status_text,
     update_ship_status,
 )
-from blhx.state import SYNC_LOCK, SYNC_STATE
-from blhx.tech import (
+from blhx.core.state import IMPORT_LOCK, IMPORT_STATE, SYNC_LOCK, SYNC_STATE
+from blhx.domain.tech import (
     attribute_bonus_from_text,
     attribute_from_text,
     parse_tech_attribute,
     split_bonus_ship_types,
     tech_attribute_matches,
 )
-from blhx.utils import clean_template_value, utc_now_text
-from blhx.wiki import (
+from blhx.core.utils import clean_template_value, utc_now_text
+from blhx.datasource.wiki import (
     WikiTableParser,
     acquire_wiki_request_slot,
     extract_ship_entries,
@@ -124,6 +129,8 @@ __all__ = [
     "RARITY_FILTER_ORDER",
     "RARITY_PRIORITY_ORDER",
     "RECOMMEND_SHIP_TYPE_ORDER",
+    "IMPORT_LOCK",
+    "IMPORT_STATE",
     "SYNC_LOCK",
     "SHIP_TYPE_ORDER",
     "SYNC_STATE",
@@ -156,7 +163,10 @@ __all__ = [
     "fetch_wiki_text",
     "find_ship_brief",
     "get_connection",
+    "build_import_report",
     "import_csv",
+    "import_result_bytes",
+    "import_status_snapshot",
     "import_template_bytes",
     "init_db",
     "insert_ship",
@@ -173,6 +183,8 @@ __all__ = [
     "parse_wiki_challenge_cookie",
     "parse_workbook_rows",
     "process_import_rows",
+    "reset_import_state",
+    "start_import",
     "rarity_rank",
     "read_config",
     "recommend_ship_type_sort_key",

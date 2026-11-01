@@ -16,9 +16,9 @@ Python 标准库 HTTP Server
 SQLite 数据库
 ```
 
-- 后端框架：Python `http.server.ThreadingHTTPServer`，由 `blhx/server.py` 内的 `TrackerHandler` 统一处理路由。
+- 后端框架：Python `http.server.ThreadingHTTPServer`，由 `blhx/web/server.py` 内的 `TrackerHandler` 统一处理路由。
 - 数据库：SQLite，默认位于 `DATA_DIR/blhx-training.sqlite3`；推荐配置保存在 `DATA_DIR/config.json`。
-- 前端：位于 `blhx/page.html` 的 HTML/CSS/JavaScript 页面，没有 Node.js 构建流程。
+- 前端：位于 `blhx/web/page.html` 的 HTML/CSS/JavaScript 页面，没有 Node.js 构建流程；站点图标为 `blhx/web/static/icon.png`，通过 `/icon.png` 提供。
 - 外部数据源：碧蓝航线 Wiki 后端接口（MediaWiki revisions API 与 Semantic MediaWiki ask API）。
 - CSV：通过标准库 `csv` 读写 UTF-8（带 BOM）`.csv`，Excel 与常见表格软件均可直接打开，没有引入额外依赖。
 - 部署：单容器 Docker 部署，宿主机 `./data` 目录挂载到容器 `/data`。
@@ -29,20 +29,29 @@ SQLite 数据库
 .
 ├── app.py                     # 兼容入口与统一导出
 ├── blhx/
-│   ├── constants.py           # 常量、排序规则与路径配置
-│   ├── utils.py               # 时间与通用工具
-│   ├── db.py                  # SQLite 连接与表结构初始化
-│   ├── history.py             # 操作历史记录与查询
-│   ├── tech.py                # 加成属性与舰种解析
-│   ├── state.py               # Wiki 同步运行状态
-│   ├── ships.py               # 舰船 CRUD、筛选与状态更新
-│   ├── recommendations.py     # 单目标与按舰种分组推荐
-│   ├── config.py              # data/config.json 配置读写
-│   ├── wiki.py                # Wiki 抓取、解析与同步
-│   ├── excel.py               # CSV 读写与导入流程
-│   ├── page.py                # 前端页面加载
-│   ├── page.html              # 前端页面
-│   └── server.py              # HTTP 路由与服务入口
+│   ├── __init__.py
+│   ├── core/                  # 通用基础设施
+│   │   ├── constants.py       # 常量、排序规则与路径配置
+│   │   ├── state.py           # 同步与导入任务状态
+│   │   └── utils.py           # 时间与通用工具
+│   ├── storage/               # 持久化层
+│   │   ├── db.py              # SQLite 连接与表结构初始化
+│   │   ├── config.py          # data/config.json 配置读写
+│   │   └── history.py         # 操作历史记录与查询
+│   ├── domain/                # 业务领域层
+│   │   ├── tech.py            # 加成属性与舰种解析
+│   │   ├── ships.py           # 舰船 CRUD、筛选与状态更新
+│   │   └── recommendations.py # 单目标与按舰种分组推荐
+│   ├── datasource/            # 外部数据源
+│   │   └── wiki.py            # Wiki 抓取、解析与同步
+│   ├── transfer/              # 数据导入导出
+│   │   └── csv_io.py          # CSV 读写、导入任务与模板
+│   ├── web/                   # Web 层
+│   │   ├── server.py          # HTTP 路由与服务入口
+│   │   ├── page.py            # 前端页面加载
+│   │   ├── page.html          # 前端页面
+│   │   └── static/icon.png    # 站点图标
+│   └── <旧模块>.py            # 兼容转发层，转发到上述子包
 ├── tests/
 │   ├── support.py             # 测试数据目录隔离
 │   └── test_app.py            # Wiki 解析、CSV 读写、筛选与导入测试
@@ -194,8 +203,10 @@ DATA_DIR/blhx-training.sqlite3
 - 按舰船名称精确匹配数据库记录。
 - 未匹配到的记录跳过，并在结果表中标注“未匹配到数据跳过”。
 - 状态列只接受 `是` 或 `否`，其他值跳过。
-- 处理完成后返回一个 `.csv` 结果文件，包含原值、处理状态和处理说明。
-- 服务端不会把导入文件或结果文件永久写入磁盘，结果通过 HTTP 响应下载。
+- 与全量同步一致，导入在后台任务中执行，页面通过进度弹窗轮询展示已处理、跳过和错误数量。
+- 导入完成后从 `/api/import/result` 下载 `.csv` 结果文件，包含原值、处理状态和处理说明。
+- 导入中重复上传会被拒绝；完成前结果文件不可下载。
+- 服务端不会把导入文件或结果文件永久写入磁盘，结果保存在进程内状态中并通过 HTTP 响应下载。
 - 导入完成后页面会先下载结果文件，再整页刷新，避免前端残留筛选状态或缓存数据造成显示遗漏。
 
 模板下载接口：
@@ -207,7 +218,9 @@ GET /api/template
 导入接口：
 
 ```text
-POST /api/import
+POST /api/import          # 上传 CSV，校验通过后启动后台导入
+GET  /api/import/status   # 导入进度（与同步进度字段一致）
+GET  /api/import/result   # 下载导入结果 CSV
 ```
 
 ### 3. 推荐下一个目标
@@ -344,7 +357,9 @@ GET /api/ships
 | `POST` | `/api/sync` | 启动 Wiki 同步 |
 | `GET` | `/api/sync/status` | 查询同步进度 |
 | `GET` | `/api/template` | 下载 CSV 导入模板 |
-| `POST` | `/api/import` | 上传 CSV 并返回处理结果 CSV |
+| `POST` | `/api/import` | 上传 CSV 并启动后台导入 |
+| `GET` | `/api/import/status` | 查询导入进度 |
+| `GET` | `/api/import/result` | 下载导入结果 CSV |
 | `POST` | `/api/ship/status` | 更新单舰已挂机或已练级状态 |
 | `POST` | `/api/ship/clear-status` | 清除单舰已挂机与已练级状态 |
 | `POST` | `/api/ship/delete` | 删除单舰及其加成记录 |

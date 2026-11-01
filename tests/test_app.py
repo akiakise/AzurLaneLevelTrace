@@ -343,10 +343,143 @@ class AppTests(unittest.TestCase):
                 ).fetchone()
                 self.assertEqual((ship["is_idling"], ship["is_trained"]), (1, 0))
 
+    def test_start_import_runs_in_background_and_exposes_result(self):
+        import time
+
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {"ship_type": "战列", "rarity": "海上传奇", "tech_points": []},
+                )
+            payload = app.csv_write(
+                [
+                    ["舰船名称", "是否已挂机", "是否已练级完成"],
+                    ["武藏", "是", "否"],
+                    ["不存在", "否", "是"],
+                ]
+            )
+            app.reset_import_state()
+            snapshot = app.start_import(payload, "test.csv")
+            self.assertTrue(snapshot["running"])
+            self.assertEqual(snapshot["total"], 2)
+            for _ in range(200):
+                status = app.import_status_snapshot()
+                if not status["running"]:
+                    break
+                time.sleep(0.02)
+            status = app.import_status_snapshot()
+            self.assertFalse(status["running"])
+            self.assertEqual(status["status"], "完成")
+            self.assertEqual(status["processed"], 1)
+            self.assertEqual(status["skipped"], 1)
+            report = app.csv_read(app.IMPORT_STATE["result"])
+            self.assertEqual(report[0], app.REPORT_HEADERS)
+            self.assertEqual(report[1][3], "处理完成")
+            self.assertEqual(report[2][3], "未匹配到数据跳过")
+
+    def test_start_import_rejects_invalid_csv_and_concurrent_start(self):
+        import threading
+        import time
+
+        with isolated_app_data():
+            with self.assertRaises(app.CsvFormatError):
+                app.start_import(b"\xff\xfe\x00\xff")
+            self.assertFalse(app.import_status_snapshot()["running"])
+
+            rows = [["舰船名称", "是否已挂机", "是否已练级完成"]]
+            rows.extend([["不存在", "是", "否"]] * 400)
+            payload = app.csv_write(rows)
+            app.reset_import_state()
+            app.start_import(payload, "slow.csv")
+            try:
+                if app.import_status_snapshot()["running"]:
+                    with self.assertRaises(ValueError):
+                        app.start_import(payload, "again.csv")
+            finally:
+                for _ in range(400):
+                    if not app.import_status_snapshot()["running"]:
+                        break
+                    time.sleep(0.02)
+
     def test_import_template_is_csv(self):
         data = app.import_template_bytes()
         self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
         self.assertEqual(app.csv_read(data), [app.IMPORT_HEADERS])
+
+    def test_import_result_is_atomic_and_locked(self):
+        import threading
+        import time
+
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {"ship_type": "战列", "rarity": "海上传奇", "tech_points": []},
+                )
+            payload = app.csv_write(
+                [
+                    ["舰船名称", "是否已挂机", "是否已练级完成"],
+                    ["武藏", "是", "是"],
+                ]
+            )
+            app.reset_import_state()
+            with self.assertRaises(LookupError):
+                app.import_result_bytes()
+            app.start_import(payload, "atomic.csv")
+            with self.assertRaises(ValueError):
+                app.import_result_bytes()
+            for _ in range(200):
+                if not app.import_status_snapshot()["running"]:
+                    break
+                time.sleep(0.02)
+            data, status = app.import_result_bytes()
+            self.assertEqual(status, "完成")
+            self.assertEqual(app.csv_read(data)[1][3], "处理完成")
+            self.assertEqual(app.csv_read(data)[1][0], "武藏")
+
+            errors = []
+
+            def reader():
+                try:
+                    for _ in range(50):
+                        app.import_status_snapshot()
+                except Exception as error:  # pragma: no cover
+                    errors.append(error)
+
+            threads = [threading.Thread(target=reader) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(errors, [])
+
+    def test_page_serves_icon_and_declares_favicon(self):
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        with isolated_app_data():
+            server = ThreadingHTTPServer(("127.0.0.1", 0), app.TrackerHandler)
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                with urllib.request.urlopen(base + "/") as response:
+                    html = response.read().decode("utf-8")
+                with urllib.request.urlopen(base + "/icon.png") as response:
+                    icon = response.read()
+                    content_type = response.headers["Content-Type"]
+                self.assertIn('href="/icon.png"', html)
+                self.assertIn('rel="icon"', html)
+                self.assertEqual(content_type, "image/png")
+                self.assertTrue(icon.startswith(b"\x89PNG\r\n\x1a\n"))
+            finally:
+                server.shutdown()
+                server.server_close()
 
     def test_import_process(self):
         with isolated_app_data():
@@ -1510,10 +1643,14 @@ class AppTests(unittest.TestCase):
         # 默认仅展示需要练级且尚未练级完成的舰船，重置筛选后保持一致。
         self.assertIn("needs_training: '是',", html)
         self.assertIn("filterState.needs_training = '是';", html)
-        # 全量导入完成后整页刷新（独立于局部回读的成功/失败）
-        self.assertIn("function scheduleImportReload(objectUrl)", html)
+        # 导入复用同步进度弹窗，完成后下载结果并整页刷新
+        self.assertIn("function showImportOverlay()", html)
+        self.assertIn("async function refreshImportStatus()", html)
+        self.assertIn("function scheduleImportReload()", html)
         self.assertIn("setTimeout(() => window.location.reload(), 1200);", html)
-        self.assertIn("      if (!imported) return;\n      // 服务端已完成写入", html)
+        self.assertIn("scheduleImportReload();", html)
+        self.assertIn('id="syncDownload"', html)
+        self.assertIn("setSyncModalMode('import')", html)
         # 表格按钮顺序
         idle = html.index(">已挂机</button>")
         trained = html.index(">已练级</button>")

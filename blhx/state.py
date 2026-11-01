@@ -1,17 +1,9 @@
+"""兼容入口：实现已迁移到 blhx.core.state。"""
+
 from __future__ import annotations
 
-import threading
-from typing import Any
+import sys
 
+from .core import state as _module
 
-SYNC_STATE: dict[str, Any] = {
-    "running": False,
-    "status": "未开始",
-    "message": "",
-    "total": 0,
-    "processed": 0,
-    "skipped": 0,
-    "errors": [],
-}
-SYNC_LOCK = threading.Lock()
-
+sys.modules[__name__] = _module
