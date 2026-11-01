@@ -41,8 +41,31 @@
     .next-table th { background:#172136; color:var(--muted); font-size:12px; }
     .next-ship-name { font-size:17px; font-weight:700; }
     .next-ship-meta { color:var(--muted); font-size:12px; margin:5px 0 10px; }
-    .next-ship-actions { display:flex; }
+    .next-ship-actions { display:flex; flex-wrap:wrap; gap:6px; }
     .next-ship-actions button { padding:6px 10px; font-size:12px; }
+    .next-ship-manual { color:var(--blue); font-size:11px; margin-left:6px; }
+    .next-target-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+    .next-target-count { color:var(--muted); font-size:12px; }
+    .next-target-controls { display:flex; gap:6px; }
+    .chip.small { padding:2px 8px; font-size:12px; border-radius:6px; }
+    .next-target-list { display:flex; flex-direction:column; gap:10px; }
+    .next-target-item + .next-target-item { border-top:1px dashed var(--line); padding-top:10px; }
+    .next-ship-stale { color:var(--red); font-size:11px; display:block; margin-top:4px; }
+    .toast-stack { position:fixed; right:20px; bottom:20px; z-index:120; display:flex; flex-direction:column; gap:10px; align-items:flex-end; }
+    .toast { background:#0b1120; border:1px solid #35507a; border-left:3px solid var(--blue); color:var(--text); border-radius:8px; padding:12px 16px; font-size:14px; box-shadow:0 10px 28px rgba(0,0,0,.35); animation:toast-in .18s ease-out; }
+    .toast.error { border-left-color:var(--red); }
+    @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    .picker-modal { width:min(560px,94vw); }
+    .picker-search { margin-bottom:10px; }
+    .picker-list { max-height:min(52vh,420px); overflow:auto; border:1px solid var(--line); border-radius:8px; }
+    .picker-item { display:flex; justify-content:space-between; gap:12px; width:100%; align-items:center; background:transparent; border:0; border-bottom:1px solid var(--line); border-radius:0; padding:10px 12px; text-align:left; }
+    .picker-item:last-child { border-bottom:0; }
+    .picker-item:hover { background:rgba(56,189,248,.08); }
+    .picker-item.selected { background:rgba(8,145,178,.18); }
+    .picker-item.selected .picker-item-name { color:var(--blue); }
+    .picker-item-name { font-size:14px; }
+    .picker-item-meta { color:var(--muted); font-size:12px; }
+    .picker-empty { padding:16px 12px; color:var(--muted); font-size:13px; }
     .history-modal { width:min(720px,96vw); }
     .history-list { max-height:min(58vh,560px); overflow:auto; margin:0; padding:0; list-style:none; }
     .history-item { border-bottom:1px solid var(--line); padding:12px 0; }
@@ -154,7 +177,7 @@
   <div id="clearConfirmModal" class="modal-overlay">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clearConfirmTitle">
       <h2 id="clearConfirmTitle">清空数据确认</h2>
-      <p class="modal-message">将删除数据库中所有舰娘及其科技点数据，此操作不可恢复。</p>
+      <p class="modal-message">将清空全部业务数据：舰船、加成属性、操作历史、推荐舰种配置和数据库自增序列，此操作不可恢复。</p>
       <div class="modal-footer">
         <button type="button" onclick="cancelClearShips()">取消</button>
         <button type="button" class="danger" onclick="confirmClearShips()">确认清空</button>
@@ -171,6 +194,22 @@
       </div>
     </div>
   </div>
+
+  <div id="shipPickerModal" class="modal-overlay">
+    <div class="modal picker-modal" role="dialog" aria-modal="true" aria-labelledby="shipPickerTitle">
+      <h2 id="shipPickerTitle">选择舰娘</h2>
+      <div class="picker-search">
+        <input id="shipPickerSearch" placeholder="输入关键字模糊筛选舰娘名称" autocomplete="off">
+      </div>
+      <div id="shipPickerList" class="picker-list"><div class="picker-empty">加载中...</div></div>
+      <div class="modal-footer">
+        <button type="button" onclick="closeShipPicker()">取消</button>
+        <button type="button" class="danger" onclick="clearShipPickerTarget()">清除已录入</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
 
   <div class="container">
     <header>
@@ -191,12 +230,11 @@
 
     <div class="card next-card">
       <div class="next-head">
-        <div class="next-title">推荐舰种配置</div>
-        <button id="confirmNextButton" class="primary" onclick="confirmNextTypes()">确认推荐</button>
+        <div class="next-title">推荐舰种配置（点选后自动保存）</div>
       </div>
       <div id="nextTypeOptions" class="chip-group next-config"><span class="empty">加载中...</span></div>
       <div class="next-title">推荐目标</div>
-      <div id="nextTargets"><span class="empty">请选择舰种并确认推荐</span></div>
+      <div id="nextTargets"><span class="empty">请选择舰种</span></div>
     </div>
 
     <div class="card">
@@ -214,17 +252,30 @@
 
   <script>
     let shipData = [];
-    let filterOptions = { shipTypes: [], rarities: [] };
+    let filterOptions = {
+      shipTypes: [],
+      rarities: [],
+      bonusShipTypes: [],
+      bonusAttributes: [],
+      recommendShipTypes: []
+    };
     let nextOptions = [];
     let nextTypeConfig = [];
     let nextTargets = [];
+    let manualTargets = {};
+    let targetLimits = {};
     let nameSearchTimer = null;
-    const techAttributes = ['装填', '命中', '炮击', '防空', '耐久', '航空', '雷击', '机动'];
+    let pickerState = { shipType: '', field: '', keyword: '', timer: null };
+    let pendingTypesSave = null;
+    let typesDirty = false;
+    // 每次点选或保存完成都递增；配置回读发起时记录序号，返回时过期则丢弃。
+    let selectionVersion = 0;
     const filterState = {
       name: '',
       ship_type: '',
       rarity: '',
-      tech_attribute: '',
+      bonus_ship_type: '',
+      bonus_attribute: '',
       needs_training: '',
       is_idling: '',
       is_trained: '否'
@@ -234,6 +285,12 @@
       div.textContent = value;
       return div.innerHTML;
     };
+    const escapeAttr = value => String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
     const statusClass = value => value === true ? 'yes' : value === false ? 'no' : 'empty';
     const statusText = value => value === true ? '是' : value === false ? '否' : '';
 
@@ -242,6 +299,15 @@
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || response.statusText);
       return result;
+    }
+
+    function showToast(text, isError = false) {
+      const stack = document.getElementById('toastStack');
+      const toast = document.createElement('div');
+      toast.className = `toast${isError ? ' error' : ''}`;
+      toast.textContent = text;
+      stack.appendChild(toast);
+      setTimeout(() => toast.remove(), 2600);
     }
 
     function showMessage(text, isError = false) {
@@ -276,15 +342,18 @@
           .map(item => item.attribute)
           .join('、') || '无';
         const actionButtons = [];
-        actionButtons.push(`<button type="button" class="danger" data-delete data-id="${escapeHtml(ship.id)}" data-name="${escapeHtml(ship.name)}">删除</button>`);
         if (ship.is_idling !== true) {
-          actionButtons.push(`<button type="button" data-action="is_idling" data-id="${escapeHtml(ship.id)}">已挂机完成</button>`);
+          actionButtons.push(`<button type="button" data-action="is_idling" data-id="${escapeAttr(ship.id)}">已挂机</button>`);
         }
         if (ship.is_trained !== true) {
-          actionButtons.push(`<button type="button" data-action="is_trained" data-id="${escapeHtml(ship.id)}">已练级完成</button>`);
+          actionButtons.push(`<button type="button" data-action="is_trained" data-id="${escapeAttr(ship.id)}">已练级</button>`);
         }
+        if (ship.is_idling !== null || ship.is_trained !== null) {
+          actionButtons.push(`<button type="button" data-clear-status data-id="${escapeAttr(ship.id)}" data-name="${escapeAttr(ship.name)}">清除数据</button>`);
+        }
+        actionButtons.push(`<button type="button" class="danger" data-delete data-id="${escapeAttr(ship.id)}" data-name="${escapeAttr(ship.name)}">删除</button>`);
         return `<tr>
-          <td><a href="${escapeHtml(ship.wiki_url)}" target="_blank" style="color:#e6edf7;">${escapeHtml(ship.name)}</a></td>
+          <td><a href="${escapeAttr(ship.wiki_url)}" target="_blank" style="color:#e6edf7;">${escapeHtml(ship.name)}</a></td>
           <td>${escapeHtml(ship.ship_type || '')}</td>
           <td>${escapeHtml(ship.rarity || '')}</td>
           <td>${escapeHtml(stageTech('解锁图鉴'))}</td>
@@ -309,12 +378,21 @@
         return `
           <button type="button"
             class="chip ${selected ? 'selected' : ''}"
-            data-next-type="${escapeHtml(option.ship_type)}"
+            data-next-type="${escapeAttr(option.ship_type)}"
           >
             ${escapeHtml(option.ship_type)}
             <span class="chip-count">挂机${option.idle_count} / 练级${option.train_count}</span>
           </button>`;
       }).join('');
+    }
+
+    function recommendSortKey(shipType) {
+      const index = filterOptions.recommendShipTypes.indexOf(shipType);
+      return index >= 0 ? index : filterOptions.recommendShipTypes.length;
+    }
+
+    function rowHasTargets(row) {
+      return Boolean((row.idle_items || []).length || (row.train_items || []).length);
     }
 
     function recommendationTech(ship) {
@@ -324,37 +402,80 @@
         .join('、');
     }
 
-    function recommendationCell(ship, field, label) {
-      if (!ship) {
-        return '<span class="empty">暂无可推荐舰娘</span>';
-      }
+    function manualNameSet(row, mode) {
+      return new Set((row[`${mode}_items`] || [])
+        .filter(item => item.manual)
+        .map(item => item.ship.name));
+    }
+
+    function recommendationItem(row, mode, item, field, limit) {
+      const ship = item.ship;
+      const manualBadge = item.manual
+        ? '<span class="next-ship-manual">手动录入</span>'
+        : '';
       return `
-        <div class="next-ship-name">${escapeHtml(ship.name)}</div>
-        <div class="next-ship-meta">${escapeHtml(ship.rarity || '')} · ${escapeHtml(recommendationTech(ship) || '无科技点')}</div>
-        <div class="next-ship-actions">
-          <button type="button"
-            data-next-action="${escapeHtml(field)}"
-            data-id="${escapeHtml(ship.id)}"
-            data-name="${escapeHtml(ship.name)}"
-          >${escapeHtml(label)}</button>
+        <div class="next-target-item">
+          <div class="next-ship-name">${escapeHtml(ship.name)}${manualBadge}</div>
+          <div class="next-ship-meta">${escapeHtml(ship.rarity || '')} · ${escapeHtml(recommendationTech(ship) || '无加成属性')}</div>
+          <div class="next-ship-actions">
+            ${item.manual ? `<button type="button"
+              data-remove-manual="${escapeAttr(field)}"
+              data-ship-type="${escapeAttr(row.ship_type)}"
+              data-id="${escapeAttr(ship.id)}"
+            >取消录入</button>` : ''}
+            <button type="button"
+              data-next-action="${escapeAttr(field)}"
+              data-id="${escapeAttr(ship.id)}"
+            >${escapeHtml(field === 'is_idling' ? '挂机完成' : '练级完成')}</button>
+          </div>
         </div>`;
+    }
+
+    function recommendationCell(row, mode, field) {
+      const items = row[`${mode}_items`] || [];
+      const limit = row[`${mode}_limit`] || 1;
+      const staleNotice = row[`${mode}_manual_stale`]
+        ? '<span class="next-ship-stale">有录入的舰娘不可用，已按自动推荐补齐</span>'
+        : '';
+      const list = items.length
+        ? items.map(item => recommendationItem(row, mode, item, field, limit)).join('')
+        : '<span class="empty">暂无可推荐舰娘</span>';
+      return `
+        <div class="next-target-head">
+          <span class="next-target-count">${items.length} / ${limit}</span>
+          <div class="next-target-controls">
+            <button type="button" class="chip small" data-limit-down="${escapeAttr(field)}" data-ship-type="${escapeAttr(row.ship_type)}" ${limit <= 1 ? 'disabled' : ''}>-</button>
+            <button type="button" class="chip small" data-limit-up="${escapeAttr(field)}" data-ship-type="${escapeAttr(row.ship_type)}" ${limit >= 10 ? 'disabled' : ''}>+</button>
+            <button type="button" class="chip small" data-pick-target="${escapeAttr(field)}" data-ship-type="${escapeAttr(row.ship_type)}" ${row[`${mode}_manual_count`] >= limit ? 'disabled' : ''}>录入</button>
+          </div>
+        </div>
+        ${staleNotice}
+        <div class="next-target-list">${list}</div>`;
     }
 
     function renderNextTargets() {
       const target = document.getElementById('nextTargets');
-      if (!nextTargets.length) {
-        target.innerHTML = '<span class="empty">请选择舰种并确认推荐</span>';
+      if (!nextTypeConfig.length) {
+        target.innerHTML = '<span class="empty">请选择舰种</span>';
+        return;
+      }
+      // 挂机与练级都没有目标项的舰种不展示；顺序与后端一致。
+      const visibleRows = nextTargets
+        .filter(row => rowHasTargets(row))
+        .sort((left, right) => recommendSortKey(left.ship_type) - recommendSortKey(right.ship_type));
+      if (!visibleRows.length) {
+        target.innerHTML = '<span class="empty">所选舰种暂无可推荐舰娘</span>';
         return;
       }
       target.innerHTML = `
         <table class="next-table">
-          <thead><tr><th>舰种</th><th>下一个挂机</th><th>下一个练级</th></tr></thead>
+          <thead><tr><th>舰种</th><th>挂机目标</th><th>练级目标</th></tr></thead>
           <tbody>
-            ${nextTargets.map(row => `
+            ${visibleRows.map(row => `
               <tr>
                 <td>${escapeHtml(row.ship_type)}</td>
-                <td>${recommendationCell(row.idle, 'is_idling', '挂机完成')}</td>
-                <td>${recommendationCell(row.train, 'is_trained', '练级完成')}</td>
+                <td>${recommendationCell(row, 'idle', 'is_idling')}</td>
+                <td>${recommendationCell(row, 'train', 'is_trained')}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -365,7 +486,8 @@
       const groups = [
         { key: 'ship_type', label: '舰种', options: ['', ...filterOptions.shipTypes] },
         { key: 'rarity', label: '稀有度', options: ['', ...filterOptions.rarities] },
-        { key: 'tech_attribute', label: '科技属性', options: ['', ...techAttributes] },
+        { key: 'bonus_ship_type', label: '加成舰种', options: ['', ...filterOptions.bonusShipTypes] },
+        { key: 'bonus_attribute', label: '加成属性', options: ['', ...filterOptions.bonusAttributes] },
         { key: 'needs_training', label: '需要练级', options: ['', '是', '否'] },
         { key: 'is_idling', label: '已挂机', options: ['', '是', '否'] },
         { key: 'is_trained', label: '已练级完成', options: ['', '是', '否'] }
@@ -376,8 +498,8 @@
           ${group.options.map(option => `
             <button type="button"
               class="chip ${filterState[group.key] === option ? 'selected' : ''}"
-              data-group="${escapeHtml(group.key)}"
-              data-value="${escapeHtml(option)}"
+              data-group="${escapeAttr(group.key)}"
+              data-value="${escapeAttr(option)}"
             >${escapeHtml(option || '全部')}</button>
           `).join('')}
         </div>
@@ -393,9 +515,154 @@
         });
         showMessage('状态已更新');
         await loadShips();
+        await loadNextTypeConfig();
         await refreshNextOptions(true);
       } catch (error) {
         showMessage(error.message, true);
+      }
+    }
+
+    async function clearShipStatus(shipId, shipName) {
+      try {
+        await requestJson('/api/ship/clear-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: shipId })
+        });
+        showToast(`已清除「${shipName}」的挂机与练级状态`);
+        await loadShips();
+        await loadNextTypeConfig();
+        await refreshNextOptions(true);
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    }
+
+    function openShipPicker(shipType, field) {
+      pickerState = { shipType, field, keyword: '', timer: null };
+      const limit = ((targetLimits[shipType] || {})[field]) || 1;
+      document.getElementById('shipPickerTitle').textContent =
+        `选择「${shipType}」${field === 'is_idling' ? '挂机' : '练级'}舰娘（最多 ${limit} 个）`;
+      document.getElementById('shipPickerSearch').value = '';
+      document.getElementById('shipPickerModal').classList.add('active');
+      loadPickerShips();
+      document.getElementById('shipPickerSearch').focus();
+    }
+
+    function closeShipPicker() {
+      clearTimeout(pickerState.timer);
+      pickerState = { shipType: '', field: '', keyword: '', timer: null };
+      document.getElementById('shipPickerModal').classList.remove('active');
+    }
+
+    async function loadPickerShips() {
+      const list = document.getElementById('shipPickerList');
+      const params = new URLSearchParams();
+      params.append('ship_types', pickerState.shipType);
+      if (pickerState.keyword) {
+        params.append('name', pickerState.keyword);
+      }
+      try {
+        const result = await requestJson('/api/ships?' + params.toString());
+        if (!result.ships.length) {
+          list.innerHTML = '<div class="picker-empty">没有匹配的舰娘</div>';
+          return;
+        }
+        const selectedIds = pickerManualIds();
+        list.innerHTML = result.ships.map(ship => {
+          const selected = selectedIds.includes(String(ship.id));
+          return `
+          <button type="button" class="picker-item ${selected ? 'selected' : ''}"
+            data-pick-id="${escapeAttr(ship.id)}"
+            data-pick-name="${escapeAttr(ship.name)}"
+          >
+            <span class="picker-item-name">${selected ? '✓ ' : ''}${escapeHtml(ship.name)}</span>
+            <span class="picker-item-meta">${escapeHtml(ship.rarity || '')} · 挂机${statusText(ship.is_idling) || '未记录'} / 练级${statusText(ship.is_trained) || '未记录'}</span>
+          </button>`;
+        }).join('');
+      } catch (error) {
+        list.innerHTML = `<div class="picker-empty">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function pickerManualIds() {
+      const targets = manualTargets[pickerState.shipType] || {};
+      return (targets[pickerState.field] || []).map(String);
+    }
+
+    async function togglePickerShip(shipId, shipName) {
+      try {
+        const result = await requestJson('/api/manual-target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ship_type: pickerState.shipType,
+            field: pickerState.field,
+            ship_id: shipId
+          })
+        });
+        manualTargets = result.manual_targets || {};
+        targetLimits = result.target_limits || {};
+        const fieldLabel = pickerState.field === 'is_idling' ? '挂机' : '练级';
+        const stillSelected = pickerManualIds().includes(String(shipId));
+        showToast(stillSelected ? `已录入「${shipName}」为${fieldLabel}舰娘` : `已取消「${shipName}」的${fieldLabel}录入`);
+        await loadNextTargets();
+        await loadPickerShips();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    }
+
+    async function changeTargetLimit(shipType, field, delta) {
+      const current = ((targetLimits[shipType] || {})[field]) || 1;
+      const next = current + delta;
+      if (next < 1 || next > 10) return;
+      try {
+        const result = await requestJson('/api/target-limit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ship_type: shipType, field, limit: next })
+        });
+        manualTargets = result.manual_targets || {};
+        targetLimits = result.target_limits || {};
+        await loadNextTargets();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    }
+
+    async function removeManualTarget(shipType, field, shipId) {
+      try {
+        const result = await requestJson('/api/manual-target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ship_type: shipType, field, ship_id: shipId })
+        });
+        manualTargets = result.manual_targets || {};
+        targetLimits = result.target_limits || {};
+        showToast('已取消录入');
+        await loadNextTargets();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    }
+
+    async function clearShipPickerTarget() {
+      const { shipType, field } = pickerState;
+      if (!shipType) return;
+      try {
+        const result = await requestJson('/api/manual-target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ship_type: shipType, field, ship_id: null })
+        });
+        manualTargets = result.manual_targets || {};
+        targetLimits = result.target_limits || {};
+        showToast('已清空该舰种的手动录入');
+        await loadNextTargets();
+        await loadPickerShips();
+      } catch (error) {
+        showToast(error.message, true);
       }
     }
 
@@ -408,6 +675,7 @@
         });
         showMessage(`已删除 ${shipName}`);
         await loadShips();
+        await loadNextTypeConfig();
         await refreshNextOptions(true);
       } catch (error) {
         showMessage(error.message, true);
@@ -450,9 +718,15 @@
           body: JSON.stringify({})
         });
         cancelClearShips();
+        nextOptions = [];
+        nextTypeConfig = [];
+        nextTargets = [];
+        manualTargets = {};
+        targetLimits = {};
         showMessage(`已清空 ${result.count} 个舰娘`);
-        await loadShips();
-        await refreshNextOptions(true);
+        resetFilters();
+        renderNextTypes();
+        renderNextTargets();
       } catch (error) {
         cancelClearShips();
         showMessage(error.message, true);
@@ -539,20 +813,44 @@
       startSync();
     }
 
+    function applyRemoteConfig(result, keepLocalTypes) {
+      if (!keepLocalTypes) {
+        nextTypeConfig = Array.isArray(result.next_ship_types)
+          ? result.next_ship_types
+          : [];
+      }
+      manualTargets = result.manual_targets && typeof result.manual_targets === 'object'
+        ? result.manual_targets
+        : {};
+      targetLimits = result.target_limits && typeof result.target_limits === 'object'
+        ? result.target_limits
+        : {};
+    }
+
     async function loadNextTypeConfig() {
+      const versionAtStart = selectionVersion;
+      const hadPendingSave = Boolean(pendingTypesSave);
       const result = await requestJson('/api/config');
-      nextTypeConfig = Array.isArray(result.next_ship_types)
-        ? result.next_ship_types
-        : [];
+      // 期间已有新的点选或保存完成，说明这次回读已过期，丢弃舰种列表。
+      const stale = versionAtStart !== selectionVersion;
+      applyRemoteConfig(result, stale || typesDirty || hadPendingSave);
     }
 
     async function saveNextTypeConfig() {
+      const submitted = [...nextTypeConfig];
+      const snapshot = JSON.stringify(submitted);
       const result = await requestJson('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ next_ship_types: nextTypeConfig })
+        body: JSON.stringify({ next_ship_types: submitted })
       });
-      nextTypeConfig = result.next_ship_types;
+      // 只有提交后没有新的点选变更时，才用服务端结果覆盖本地状态。
+      const unchanged = JSON.stringify(nextTypeConfig) === snapshot;
+      applyRemoteConfig(result, !unchanged);
+      if (unchanged) {
+        typesDirty = false;
+        selectionVersion += 1;
+      }
     }
 
     async function refreshNextOptions(loadTargets = false) {
@@ -585,25 +883,6 @@
       const params = new URLSearchParams();
       nextTypeConfig.forEach(type => params.append('ship_types', type));
       return params;
-    }
-
-    async function confirmNextTypes() {
-      if (!nextTypeConfig.length) {
-        showMessage('请至少选择一个推荐舰种', true);
-        return;
-      }
-      const button = document.getElementById('confirmNextButton');
-      button.disabled = true;
-      try {
-        await saveNextTypeConfig();
-        await loadNextTargets();
-        showMessage('已更新推荐结果');
-      } catch (error) {
-        showMessage(error.message, true);
-        await refreshNextOptions();
-      } finally {
-        button.disabled = false;
-      }
     }
 
     async function refreshSyncStatus() {
@@ -697,6 +976,8 @@
       if (!file) return;
       const form = new FormData();
       form.append('file', file);
+      let imported = false;
+      let objectUrl = '';
       try {
         const response = await fetch('/api/import', { method: 'POST', body: form });
         if (!response.ok) {
@@ -705,25 +986,42 @@
         }
         const blob = await response.blob();
         const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
+        objectUrl = URL.createObjectURL(blob);
+        link.href = objectUrl;
         link.download = '导入处理结果.xlsx';
         link.click();
-        URL.revokeObjectURL(link.href);
+        imported = true;
         showMessage('Excel 处理完成，已下载处理结果');
-        await loadShips();
-        await refreshNextOptions(true);
+        showToast('导入完成，页面即将自动刷新');
       } catch (error) {
         showMessage(error.message, true);
       } finally {
         input.value = '';
       }
+      if (!imported) return;
+      // 服务端已完成写入，后续局部回读失败也不能影响整页刷新。
+      scheduleImportReload(objectUrl);
+      try {
+        await loadShips();
+        await refreshNextOptions(true);
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    function scheduleImportReload(objectUrl) {
+      // 全量导入后整页刷新，避免前端残留状态与数据库不一致。
+      // 稍等再回收对象 URL 并刷新，避免结果文件下载被中断。
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 3000);
+      setTimeout(() => window.location.reload(), 1200);
     }
 
     function resetFilters() {
       filterState.name = '';
       filterState.ship_type = '';
       filterState.rarity = '';
-      filterState.tech_attribute = '';
+      filterState.bonus_ship_type = '';
+      filterState.bonus_attribute = '';
       filterState.needs_training = '';
       filterState.is_idling = '';
       filterState.is_trained = '否';
@@ -733,9 +1031,12 @@
     }
 
     async function initialize() {
-      const ships = await requestJson('/api/ships');
-      filterOptions.shipTypes = [...new Set(ships.ships.map(ship => ship.ship_type).filter(Boolean))].sort();
-      filterOptions.rarities = [...new Set(ships.ships.map(ship => ship.rarity).filter(Boolean))];
+      const options = await requestJson('/api/filter-options');
+      filterOptions.shipTypes = options.ship_types;
+      filterOptions.rarities = options.rarities;
+      filterOptions.bonusShipTypes = options.bonus_ship_types;
+      filterOptions.bonusAttributes = options.bonus_attributes;
+      filterOptions.recommendShipTypes = options.recommend_ship_types || [];
       renderFilters();
       await loadShips();
       await loadNextTypeConfig();
@@ -772,16 +1073,98 @@
       nextTypeConfig = nextTypeConfig.includes(shipType)
         ? nextTypeConfig.filter(type => type !== shipType)
         : [...nextTypeConfig, shipType];
+      typesDirty = true;
+      selectionVersion += 1;
       renderNextTypes();
+      await syncNextTypes();
+    }
+
+    // 串行提交：连续点选时只保留最后一次请求的响应，避免旧响应覆盖新状态。
+    // 直到整套保存 + 刷新都结束后才释放队列，期间的新点选会在循环里重放。
+    async function syncNextTypes() {
+      if (pendingTypesSave) {
+        pendingTypesSave.queued = true;
+        return pendingTypesSave.promise;
+      }
+      const job = { queued: false, promise: null };
+      job.promise = (async () => {
+        try {
+          while (true) {
+            job.queued = false;
+            const snapshot = JSON.stringify(nextTypeConfig);
+            await saveNextTypeConfig();
+            if (job.queued || JSON.stringify(nextTypeConfig) !== snapshot) {
+              continue;
+            }
+            await loadNextTargets();
+            if (!job.queued && JSON.stringify(nextTypeConfig) === snapshot) {
+              break;
+            }
+          }
+          showToast('推荐舰种已更新');
+          typesDirty = false;
+          selectionVersion += 1;
+          renderNextTypes();
+        } catch (error) {
+          showToast(error.message, true);
+          await loadNextTypeConfig();
+          renderNextTypes();
+        } finally {
+          if (pendingTypesSave === job) pendingTypesSave = null;
+        }
+      })();
+      pendingTypesSave = job;
+      return job.promise;
     }
 
     document.getElementById('nextTargets').addEventListener('click', event => {
+      const downButton = event.target.closest('button[data-limit-down]');
+      if (downButton) {
+        changeTargetLimit(downButton.dataset.shipType, downButton.dataset.limitDown, -1);
+        return;
+      }
+      const upButton = event.target.closest('button[data-limit-up]');
+      if (upButton) {
+        changeTargetLimit(upButton.dataset.shipType, upButton.dataset.limitUp, 1);
+        return;
+      }
+      const removeButton = event.target.closest('button[data-remove-manual]');
+      if (removeButton) {
+        removeManualTarget(removeButton.dataset.shipType, removeButton.dataset.removeManual, Number(removeButton.dataset.id));
+        return;
+      }
+      const pickButton = event.target.closest('button[data-pick-target]');
+      if (pickButton) {
+        openShipPicker(pickButton.dataset.shipType, pickButton.dataset.pickTarget);
+        return;
+      }
       const actionButton = event.target.closest('button[data-next-action]');
       if (!actionButton) return;
       completeShipStatus(Number(actionButton.dataset.id), actionButton.dataset.nextAction);
     });
 
+    document.getElementById('shipPickerSearch').addEventListener('input', event => {
+      pickerState.keyword = event.target.value.trim();
+      clearTimeout(pickerState.timer);
+      pickerState.timer = setTimeout(loadPickerShips, 250);
+    });
+
+    document.getElementById('shipPickerList').addEventListener('click', event => {
+      const item = event.target.closest('button[data-pick-id]');
+      if (!item) return;
+      togglePickerShip(Number(item.dataset.pickId), item.dataset.pickName);
+    });
+
+    document.getElementById('shipPickerModal').addEventListener('click', event => {
+      if (event.target.id === 'shipPickerModal') closeShipPicker();
+    });
+
     document.getElementById('shipTable').addEventListener('click', event => {
+      const clearButton = event.target.closest('button[data-clear-status]');
+      if (clearButton) {
+        clearShipStatus(Number(clearButton.dataset.id), clearButton.dataset.name);
+        return;
+      }
       const deleteButton = event.target.closest('button[data-delete]');
       if (deleteButton) {
         requestDeleteShip(Number(deleteButton.dataset.id), deleteButton.dataset.name);

@@ -6,14 +6,32 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from .config import read_config, save_next_ship_types
-from .constants import LOGGER
+from .config import (
+    read_config,
+    save_next_ship_types,
+    save_target_limit,
+    toggle_manual_target,
+)
+from .constants import (
+    BONUS_ATTRIBUTE_ORDER,
+    BONUS_SHIP_TYPE_ORDER,
+    LOGGER,
+    RARITY_FILTER_ORDER,
+    RECOMMEND_SHIP_TYPE_ORDER,
+    SHIP_TYPE_ORDER,
+)
 from .db import init_db
 from .excel import import_excel, import_template_bytes, parse_multipart_file
 from .history import list_operations
 from .page import PAGE_HTML
 from .recommendations import available_next_ship_types, next_ship, next_ships_by_type
-from .ships import clear_ships, delete_ship, list_ships, update_ship_status
+from .ships import (
+    clear_ship_statuses,
+    clear_ships,
+    delete_ship,
+    list_ships,
+    update_ship_status,
+)
 from .state import SYNC_STATE
 from .wiki import start_sync
 
@@ -67,18 +85,32 @@ class TrackerHandler(BaseHTTPRequestHandler):
             raise ValueError("请求体必须是 JSON 对象")
         return payload
 
-    def query_filters(self) -> dict[str, str]:
+    def query_filters(self) -> dict[str, Any]:
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         keys = [
             "name",
             "ship_type",
             "rarity",
-            "tech_attribute",
+            "bonus_ship_type",
+            "bonus_attribute",
             "needs_training",
             "is_idling",
             "is_trained",
         ]
-        return {key: query.get(key, [""])[0].strip() for key in keys}
+        filters: dict[str, Any] = {
+            key: query.get(key, [""])[0].strip() for key in keys
+        }
+        # 与 /api/next-group 统一：ship_types 复数参数优先，支持列出多个舰种。
+        ship_types = [
+            value.strip()
+            for value in query.get("ship_types", [])
+            if value.strip()
+        ]
+        if not ship_types and filters["ship_type"]:
+            ship_types = [filters["ship_type"]]
+        if ship_types:
+            filters["ship_types"] = ship_types
+        return filters
 
     def next_query_ship_types(self) -> list[str]:
         query = parse_qs(urlsplit(self.path).query)
@@ -102,6 +134,16 @@ class TrackerHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/ships":
                 self.send_json({"ships": list_ships(self.query_filters())})
+            elif path == "/api/filter-options":
+                self.send_json(
+                    {
+                        "ship_types": SHIP_TYPE_ORDER,
+                        "rarities": RARITY_FILTER_ORDER,
+                        "bonus_ship_types": BONUS_SHIP_TYPE_ORDER,
+                        "bonus_attributes": BONUS_ATTRIBUTE_ORDER,
+                        "recommend_ship_types": RECOMMEND_SHIP_TYPE_ORDER,
+                    }
+                )
             elif path == "/api/config":
                 self.send_json(read_config())
             elif path == "/api/next-options":
@@ -120,11 +162,17 @@ class TrackerHandler(BaseHTTPRequestHandler):
             elif path == "/api/next-group":
                 query = parse_qs(urlsplit(self.path).query)
                 mode = query.get("mode", ["both"])[0]
+                config = read_config()
+                ship_types = (
+                    self.next_query_ship_types() or config["next_ship_types"]
+                )
                 self.send_json(
                     {
                         "rows": next_ships_by_type(
                             mode,
-                            self.next_query_ship_types(),
+                            ship_types,
+                            config["manual_targets"],
+                            config["target_limits"],
                         )
                     }
                 )
@@ -174,7 +222,37 @@ class TrackerHandler(BaseHTTPRequestHandler):
                 ship_types = save_next_ship_types(
                     payload.get("next_ship_types", [])
                 )
-                self.send_json({"next_ship_types": ship_types})
+                config = read_config()
+                self.send_json(
+                    {
+                        "next_ship_types": ship_types,
+                        "target_limits": config["target_limits"],
+                        "manual_targets": config["manual_targets"],
+                    }
+                )
+            elif path == "/api/target-limit":
+                payload = self.read_json()
+                config = save_target_limit(
+                    str(payload.get("ship_type", "")),
+                    str(payload.get("field", "")),
+                    payload.get("limit"),
+                )
+                self.send_json(config)
+            elif path == "/api/manual-target":
+                payload = self.read_json()
+                config = toggle_manual_target(
+                    str(payload.get("ship_type", "")),
+                    str(payload.get("field", "")),
+                    payload.get("ship_id"),
+                )
+                self.send_json(config)
+            elif path == "/api/ship/clear-status":
+                payload = self.read_json()
+                cleared = clear_ship_statuses(int(payload.get("id", 0)))
+                if cleared is None:
+                    self.send_error_json("舰船不存在", 404)
+                    return
+                self.send_json({"ship": cleared})
             elif path == "/api/import":
                 body = self.read_body()
                 uploaded = parse_multipart_file(

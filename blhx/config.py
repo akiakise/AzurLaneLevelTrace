@@ -1,55 +1,201 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import threading
+from contextlib import contextmanager
+from typing import Any, Iterator
 
-from .constants import CONFIG_PATH, LOGGER
+from .constants import CONFIG_PATH, LOGGER, normalize_ship_type
+
+
+MANUAL_TARGET_FIELDS = ("is_idling", "is_trained")
+DEFAULT_TARGET_LIMIT = 1
+MAX_TARGET_LIMIT = 10
+CONFIG_LOCK = threading.RLock()
+
+
+@contextmanager
+def config_transaction() -> Iterator[None]:
+    """串行化 config.json 的读取-修改-写入，避免并发互相覆盖。"""
+    with CONFIG_LOCK:
+        yield
+
+
+def normalize_target_limit(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_TARGET_LIMIT
+    return max(1, min(value, MAX_TARGET_LIMIT))
+
+
+def _normalize_ship_type_list(value: Any) -> list[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        return []
+    return list(
+        dict.fromkeys(
+            normalize_ship_type(item)
+            for item in value
+            if normalize_ship_type(item)
+        )
+    )
+
+
+def _normalize_ship_ids(value: Any) -> list[int]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    ship_ids: list[int] = []
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool) and item > 0:
+            if item not in ship_ids:
+                ship_ids.append(item)
+    return ship_ids
+
+
+def _normalize_target_limits(
+    value: Any,
+    ship_types: list[str],
+) -> dict[str, dict[str, int]]:
+    source = value if isinstance(value, dict) else {}
+    limits: dict[str, dict[str, int]] = {}
+    for ship_type in ship_types:
+        raw = source.get(ship_type)
+        raw = raw if isinstance(raw, dict) else {}
+        limits[ship_type] = {
+            field: normalize_target_limit(raw.get(field))
+            for field in MANUAL_TARGET_FIELDS
+        }
+    return limits
+
+
+def _normalize_manual_targets(
+    value: Any,
+    target_limits: dict[str, dict[str, int]],
+) -> dict[str, dict[str, list[int]]]:
+    if not isinstance(value, dict):
+        return {}
+    manual_targets: dict[str, dict[str, list[int]]] = {}
+    for raw_ship_type, targets in value.items():
+        if not isinstance(raw_ship_type, str) or not isinstance(targets, dict):
+            continue
+        ship_type = normalize_ship_type(raw_ship_type)
+        if ship_type not in target_limits:
+            continue
+        normalized: dict[str, list[int]] = {}
+        for field in MANUAL_TARGET_FIELDS:
+            ship_ids = _normalize_ship_ids(targets.get(field))
+            ship_ids = ship_ids[: target_limits[ship_type][field]]
+            if ship_ids:
+                normalized[field] = ship_ids
+        if normalized:
+            manual_targets[ship_type] = normalized
+    return manual_targets
+
+
+def empty_config() -> dict[str, Any]:
+    return {"next_ship_types": [], "target_limits": {}, "manual_targets": {}}
 
 
 def read_config() -> dict[str, Any]:
     try:
         payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
-        return {"next_ship_types": []}
+        return empty_config()
     except (OSError, json.JSONDecodeError) as error:
         LOGGER.warning("读取配置文件失败，使用默认配置: %s", error)
-        return {"next_ship_types": []}
+        return empty_config()
     if not isinstance(payload, dict):
         LOGGER.warning("配置文件格式无效，使用默认配置")
-        return {"next_ship_types": []}
-    ship_types = payload.get("next_ship_types", [])
-    if not isinstance(ship_types, list) or not all(
-        isinstance(value, str) for value in ship_types
-    ):
-        LOGGER.warning("推荐舰种配置格式无效，使用默认配置")
-        return {"next_ship_types": []}
+        return empty_config()
+    ship_types = _normalize_ship_type_list(payload.get("next_ship_types", []))
+    target_limits = _normalize_target_limits(
+        payload.get("target_limits", {}), ship_types
+    )
     return {
-        "next_ship_types": list(
-            dict.fromkeys(value.strip() for value in ship_types if value.strip())
-        )
+        "next_ship_types": ship_types,
+        "target_limits": target_limits,
+        "manual_targets": _normalize_manual_targets(
+            payload.get("manual_targets", {}), target_limits
+        ),
     }
 
 
+def _drop_missing_ship_ids(
+    manual_targets: dict[str, dict[str, list[int]]],
+) -> dict[str, dict[str, list[int]]]:
+    ship_ids = {
+        ship_id
+        for targets in manual_targets.values()
+        for ids in targets.values()
+        for ship_id in ids
+    }
+    if not ship_ids:
+        return manual_targets
+    from .ships import find_existing_ship_ids
+
+    existing = find_existing_ship_ids(ship_ids)
+    cleaned: dict[str, dict[str, list[int]]] = {}
+    for ship_type, targets in manual_targets.items():
+        kept: dict[str, list[int]] = {}
+        for field, ids in targets.items():
+            kept_ids = [ship_id for ship_id in ids if ship_id in existing]
+            if kept_ids:
+                kept[field] = kept_ids
+        if kept:
+            cleaned[ship_type] = kept
+    return cleaned
+
+
 def write_config(config: dict[str, Any]) -> None:
+    ship_types = _normalize_ship_type_list(config.get("next_ship_types", []))
+    target_limits = _normalize_target_limits(
+        config.get("target_limits", {}), ship_types
+    )
+    payload = {
+        "next_ship_types": ship_types,
+        "target_limits": target_limits,
+        "manual_targets": _drop_missing_ship_ids(
+            _normalize_manual_targets(
+                config.get("manual_targets", {}), target_limits
+            )
+        ),
+    }
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    temporary_path = CONFIG_PATH.with_suffix(
+        f"{CONFIG_PATH.suffix}.{threading.get_ident()}.tmp"
+    )
     temporary_path.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     temporary_path.replace(CONFIG_PATH)
 
 
+def remove_config() -> None:
+    try:
+        CONFIG_PATH.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        LOGGER.error("删除配置文件失败: %s", error)
+        raise ValueError(f"删除推荐舰种配置失败：{error}") from error
+
+
 def save_next_ship_types(ship_types: list[str]) -> list[str]:
+    with config_transaction():
+        return _save_next_ship_types(ship_types)
+
+
+def _save_next_ship_types(ship_types: list[str]) -> list[str]:
     from .recommendations import available_next_ship_types
 
     if not isinstance(ship_types, list) or not all(
         isinstance(value, str) for value in ship_types
     ):
         raise ValueError("next_ship_types 必须是舰种列表")
-    ship_types = list(
-        dict.fromkeys(value.strip() for value in ship_types if value.strip())
-    )
+    ship_types = _normalize_ship_type_list(ship_types)
     if ship_types:
         available_types = {
             option["ship_type"] for option in available_next_ship_types()
@@ -61,5 +207,147 @@ def save_next_ship_types(ship_types: list[str]) -> list[str]:
             raise ValueError(
                 "舰种不存在或已无可练级舰娘：" + "、".join(unavailable_types)
             )
-    write_config({"next_ship_types": ship_types})
+    current = read_config()
+    write_config(
+        {
+            "next_ship_types": ship_types,
+            "target_limits": current["target_limits"],
+            "manual_targets": current["manual_targets"],
+        }
+    )
     return ship_types
+
+
+def _require_selected_ship_type(config: dict[str, Any], ship_type: str) -> str:
+    ship_type = normalize_ship_type(ship_type)
+    if not ship_type:
+        raise ValueError("ship_type 不能为空")
+    if ship_type not in config["next_ship_types"]:
+        raise ValueError(f"舰种「{ship_type}」不在推荐舰种配置中")
+    return ship_type
+
+
+def _require_field(field: str) -> str:
+    if field not in MANUAL_TARGET_FIELDS:
+        raise ValueError("field 只支持 is_idling 或 is_trained")
+    return field
+
+
+def save_target_limit(ship_type: str, field: str, limit: Any) -> dict[str, Any]:
+    with config_transaction():
+        return _save_target_limit(ship_type, field, limit)
+
+
+def _save_target_limit(ship_type: str, field: str, limit: Any) -> dict[str, Any]:
+    config = read_config()
+    ship_type = _require_selected_ship_type(config, ship_type)
+    field = _require_field(field)
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("limit 必须是 1 到 10 之间的整数")
+    if not 1 <= limit <= MAX_TARGET_LIMIT:
+        raise ValueError(f"limit 必须是 1 到 {MAX_TARGET_LIMIT} 之间的整数")
+    target_limits = {
+        key: dict(value) for key, value in config["target_limits"].items()
+    }
+    target_limits[ship_type][field] = limit
+    manual_targets = {
+        key: {name: list(ids) for name, ids in value.items()}
+        for key, value in config["manual_targets"].items()
+    }
+    targets = manual_targets.get(ship_type, {})
+    if len(targets.get(field, [])) > limit:
+        targets[field] = targets[field][:limit]
+        if not targets[field]:
+            targets.pop(field, None)
+        if targets:
+            manual_targets[ship_type] = targets
+        else:
+            manual_targets.pop(ship_type, None)
+    write_config(
+        {
+            "next_ship_types": config["next_ship_types"],
+            "target_limits": target_limits,
+            "manual_targets": manual_targets,
+        }
+    )
+    return read_config()
+
+
+def _active_manual_ids(
+    ship_type: str, field: str, ship_ids: list[int]
+) -> list[int]:
+    if not ship_ids:
+        return []
+    from .ships import list_ships
+
+    rows = list_ships({"ship_ids": ship_ids, "ship_types": [ship_type]})
+    by_id = {row["id"]: row for row in rows}
+    return [
+        ship_id
+        for ship_id in ship_ids
+        if ship_id in by_id and by_id[ship_id][field] is not True
+    ]
+
+
+def toggle_manual_target(
+    ship_type: str,
+    field: str,
+    ship_id: Any,
+) -> dict[str, Any]:
+    """人工录入/取消某舰种某模式下的舰娘；已存在则移除。"""
+    with config_transaction():
+        return _toggle_manual_target(ship_type, field, ship_id)
+
+
+def _toggle_manual_target(
+    ship_type: str,
+    field: str,
+    ship_id: Any,
+) -> dict[str, Any]:
+    config = read_config()
+    ship_type = _require_selected_ship_type(config, ship_type)
+    field = _require_field(field)
+    limit = config["target_limits"][ship_type][field]
+    manual_targets = {
+        key: {name: list(ids) for name, ids in value.items()}
+        for key, value in config["manual_targets"].items()
+    }
+    targets = manual_targets.setdefault(ship_type, {})
+    ship_ids = targets.setdefault(field, [])
+    if ship_id is None:
+        ship_ids.clear()
+    else:
+        if isinstance(ship_id, bool) or not isinstance(ship_id, int) or ship_id <= 0:
+            raise ValueError("ship_id 必须是正整数")
+        from .ships import find_ship_brief
+
+        ship = find_ship_brief(ship_id)
+        if ship is None:
+            raise ValueError("舰船不存在")
+        if ship["ship_type"] != ship_type:
+            raise ValueError(f"舰船「{ship['name']}」不属于舰种「{ship_type}」")
+        if ship_id in ship_ids:
+            ship_ids.remove(ship_id)
+        else:
+            if ship[field] is True:
+                raise ValueError(f"舰船「{ship['name']}」已完成，不能录入")
+            # 只统计仍存在且未完成的有效录入，避免悬空/已完成项占满名额。
+            active_ids = _active_manual_ids(ship_type, field, ship_ids)
+            if len(active_ids) >= limit:
+                raise ValueError(
+                    f"「{ship_type}」最多录入 {limit} 个，请先取消已有录入"
+                )
+            ship_ids[:] = active_ids
+            ship_ids.append(ship_id)
+    if not ship_ids:
+        targets.pop(field, None)
+    if not targets:
+        manual_targets.pop(ship_type, None)
+    write_config(
+        {
+            "next_ship_types": config["next_ship_types"],
+            "target_limits": config["target_limits"],
+            "manual_targets": manual_targets,
+        }
+    )
+    return read_config()

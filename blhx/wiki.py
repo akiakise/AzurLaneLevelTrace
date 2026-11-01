@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from .constants import (
     LOGGER,
+    normalize_ship_type,
     TECH_STAGE_FIELDS,
     USER_AGENT,
     WIKI_API_PATH,
@@ -142,7 +143,7 @@ def parse_ship_raw(raw_text: str) -> dict[str, Any] | None:
         if attribute:
             tech_points.append({"stage": stage, "attribute": attribute, "points": 0})
     return {
-        "ship_type": fields.get("类型", ""),
+        "ship_type": normalize_ship_type(fields.get("类型", "")),
         "rarity": fields.get("稀有度", ""),
         "tech_points": tech_points,
     }

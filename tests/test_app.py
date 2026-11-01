@@ -1,10 +1,10 @@
-import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 from urllib.error import HTTPError
 
 import app
+from support import isolated_app_data
 
 
 class AppTests(unittest.TestCase):
@@ -206,6 +206,17 @@ class AppTests(unittest.TestCase):
         self.assertEqual(parsed["tech_points"][1]["stage"], "达到120级")
         self.assertEqual(parsed["tech_points"][1]["attribute"], "战巡/战列/航战 炮击")
 
+    def test_parse_ship_raw_merges_sail_ship_types(self):
+        raw = r"""
+        {{舰娘图鉴
+        |名称=皇家财富号
+        |类型=风帆S
+        |稀有度=精锐
+        |解锁图鉴属性加成=风帆 耐久+2
+        }}
+        """
+        self.assertEqual(app.parse_ship_raw(raw)["ship_type"], "风帆")
+
     def test_parse_template_fields_removes_html_comments(self):
         raw = r"""
         {{舰娘图鉴
@@ -230,10 +241,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(any("{{非目标模板}}" in message for message in logs.output))
 
     def test_init_db_cleans_existing_template_comments(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 ship = app.insert_ship(
                     connection,
@@ -266,10 +274,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(app.xlsx_read(data), rows)
 
     def test_import_process(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 battle_ship = app.insert_ship(
                     connection,
@@ -294,10 +299,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(report_rows[1]["处理状态"], "未匹配到数据跳过")
 
     def test_ship_filter_sort_and_status_update(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 ship_1 = app.insert_ship(
                     connection,
@@ -334,7 +336,7 @@ class AppTests(unittest.TestCase):
 
             ships = app.list_ships({"is_trained": "否"})
             self.assertEqual([ship["name"] for ship in ships], ["古鹰", "武藏"])
-            ships = app.list_ships({"tech_attribute": "机动"})
+            ships = app.list_ships({"bonus_attribute": "机动"})
             self.assertEqual([ship["name"] for ship in ships], ["古鹰"])
 
             updated = app.update_ship_status(ship_1["id"], "is_idling", True)
@@ -342,10 +344,7 @@ class AppTests(unittest.TestCase):
             self.assertIsNone(updated["is_trained"])
 
     def test_tech_attribute_matches_each_ship_type(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 app.insert_ship(
                     connection,
@@ -401,20 +400,22 @@ class AppTests(unittest.TestCase):
                 (["战巡", "战列", "航战"], "耐久"),
             )
             ships = app.list_ships(
-                {"ship_type": "战列", "tech_attribute": "耐久"}
+                {"bonus_ship_type": "战列", "bonus_attribute": "耐久"}
             )
             self.assertEqual([ship["name"] for ship in ships], ["武藏", "易北"])
             ships = app.list_ships(
-                {"ship_type": "战列", "tech_attribute": "炮击"}
+                {"bonus_ship_type": "战列", "bonus_attribute": "炮击"}
             )
             self.assertEqual(ships, [])
+            ships = app.list_ships(
+                {"ship_type": "战列", "bonus_attribute": "耐久"}
+            )
+            self.assertEqual([ship["name"] for ship in ships], ["武藏", "重樱专属"])
+            ships = app.list_ships({"bonus_ship_type": "重巡", "bonus_attribute": "耐久"})
+            self.assertEqual([ship["name"] for ship in ships], ["重樱专属"])
 
     def test_next_ship_type_config_uses_data_file(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.config.CONFIG_PATH = Path(temp_dir) / "config.json"
-            app.init_db()
+        with isolated_app_data() as temp_dir:
             with app.get_connection() as connection:
                 app.insert_ship(
                     connection,
@@ -435,21 +436,34 @@ class AppTests(unittest.TestCase):
 
             saved = app.save_next_ship_types(["战列"])
             self.assertEqual(saved, ["战列"])
-            self.assertEqual(app.read_config(), {"next_ship_types": ["战列"]})
+            self.assertEqual(
+                app.read_config(),
+                {
+                    "next_ship_types": ["战列"],
+                    "target_limits": {
+                        "战列": {"is_idling": 1, "is_trained": 1}
+                    },
+                    "manual_targets": {},
+                },
+            )
             with app.config.CONFIG_PATH.open(encoding="utf-8") as file:
                 import json
 
                 self.assertEqual(
-                    json.load(file), {"next_ship_types": ["战列"]}
+                    json.load(file),
+                    {
+                        "next_ship_types": ["战列"],
+                        "target_limits": {
+                            "战列": {"is_idling": 1, "is_trained": 1}
+                        },
+                        "manual_targets": {},
+                    },
                 )
             with self.assertRaises(ValueError):
                 app.save_next_ship_types(["战列", "驱逐"])
 
     def test_next_ship_supports_available_ship_types(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 battle_ship = app.insert_ship(
                     connection,
@@ -558,10 +572,7 @@ class AppTests(unittest.TestCase):
                 app.next_ship("train", ship_types=["重巡"])
 
     def test_operation_history_records_status_and_delete(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 ship = app.insert_ship(
                     connection,
@@ -593,10 +604,7 @@ class AppTests(unittest.TestCase):
             self.assertTrue(operations[0]["created_at"])
 
     def test_partial_sync_matches_and_overwrites(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 app.insert_ship(
                     connection,
@@ -650,10 +658,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("古鹰", app.SYNC_STATE["message"])
 
     def test_delete_ship_removes_related_data(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 ship = app.insert_ship(
                     connection,
@@ -676,10 +681,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app.list_ships({}), [])
 
     def test_clear_ships_removes_all_data(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app.db.DATA_DIR = Path(temp_dir)
-            app.db.DATABASE_PATH = Path(temp_dir) / "test.sqlite3"
-            app.init_db()
+        with isolated_app_data():
             with app.get_connection() as connection:
                 for name, date, stage in [
                     ("武藏", "2023-08-17", "解锁图鉴"),
@@ -709,6 +711,1043 @@ class AppTests(unittest.TestCase):
                     connection.execute("SELECT COUNT(*) FROM tech_points").fetchone()[0],
                     0,
                 )
+
+
+    def test_filter_option_orders(self):
+        self.assertEqual(
+            app.SHIP_TYPE_ORDER,
+            [
+                "驱逐", "轻巡", "重巡", "超巡", "战巡", "战列", "航母", "轻航",
+                "重炮", "维修", "航战", "潜艇", "潜母", "运输", "风帆",
+            ],
+        )
+        self.assertEqual(
+            app.RARITY_FILTER_ORDER,
+            ["普通", "稀有", "精锐", "超稀有", "海上传奇", "最高方案", "决战方案"],
+        )
+        self.assertEqual(
+            app.BONUS_SHIP_TYPE_ORDER,
+            [
+                "驱逐", "轻巡", "重巡", "超巡", "战巡", "战列", "正航", "轻航",
+                "重炮", "维修", "航战", "潜艇", "潜母", "运输", "风帆",
+            ],
+        )
+        self.assertEqual(
+            app.BONUS_ATTRIBUTE_ORDER,
+            ["耐久", "炮击", "雷击", "防空", "航空", "装填", "机动", "命中", "反潜"],
+        )
+
+    def test_sail_ship_types_are_merged(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                for name, ship_type in [
+                    ("皇家财富号", "风帆S"),
+                    ("金鹿号", "风帆V"),
+                    ("圣马丁号", "风帆M"),
+                ]:
+                    app.insert_ship(
+                        connection,
+                        name,
+                        "2024-01-01",
+                        {
+                            "ship_type": ship_type,
+                            "rarity": "精锐",
+                            "tech_points": [
+                                {"stage": "解锁图鉴", "attribute": "风帆 耐久", "points": 0}
+                            ],
+                        },
+                    )
+
+            ships = app.list_ships({"ship_type": "风帆"})
+            self.assertEqual(len(ships), 3)
+            self.assertTrue(all(ship["ship_type"] == "风帆" for ship in ships))
+
+    def test_bonus_filters_use_bonus_ship_type_column(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "企业",
+                    "2020-01-01",
+                    {
+                        "ship_type": "航母",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "轻航/正航 装填",
+                                "points": 0,
+                            }
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 0,
+                            },
+                            {
+                                "stage": "达到120级",
+                                "attribute": "战巡/战列/航战 炮击",
+                                "points": 0,
+                            },
+                        ],
+                    },
+                )
+
+            ships = app.list_ships({"bonus_ship_type": "正航"})
+            self.assertEqual([ship["name"] for ship in ships], ["企业"])
+            ships = app.list_ships({"bonus_ship_type": "轻航"})
+            self.assertEqual([ship["name"] for ship in ships], ["企业"])
+            ships = app.list_ships({"bonus_attribute": "炮击"})
+            self.assertEqual([ship["name"] for ship in ships], ["武藏"])
+            ships = app.list_ships({"bonus_ship_type": "战列", "bonus_attribute": "耐久"})
+            self.assertEqual([ship["name"] for ship in ships], ["武藏"])
+            self.assertEqual(
+                app.list_ships({"bonus_ship_type": "航母"}), []
+            )
+
+    def test_tech_priority_uses_bonus_ship_type(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "企业",
+                    "2020-01-01",
+                    {
+                        "ship_type": "航母",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "轻航/正航 装填", "points": 0}
+                        ],
+                    },
+                )
+                light_carrier = app.insert_ship(
+                    connection,
+                    "兰利",
+                    "2021-01-01",
+                    {
+                        "ship_type": "轻航",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "轻航/正航 装填", "points": 0}
+                        ],
+                    },
+                )
+                other = app.insert_ship(
+                    connection,
+                    "重樱",
+                    "2022-01-01",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "战巡/战列/航战 耐久", "points": 0}
+                        ],
+                    },
+                )
+            ships = {ship["name"]: ship for ship in app.list_ships({})}
+            self.assertEqual(app.tech_priority_rank(ships["企业"]), 0)
+            self.assertEqual(app.tech_priority_rank(ships["兰利"]), 0)
+            self.assertGreater(app.tech_priority_rank(ships["重樱"]), 0)
+            self.assertEqual(light_carrier["ship_type"], "轻航")
+
+    def test_clear_ships_on_empty_database(self):
+        with isolated_app_data():
+            self.assertEqual(app.clear_ships(), 0)
+            self.assertEqual(app.list_ships({}), [])
+            self.assertEqual(
+                app.read_config(),
+                {"next_ship_types": [], "target_limits": {}, "manual_targets": {}},
+            )
+
+    def test_clear_ships_rejects_when_sync_running(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {"ship_type": "战列", "rarity": "海上传奇", "tech_points": []},
+                )
+            app.SYNC_STATE["running"] = True
+            try:
+                with self.assertRaises(ValueError):
+                    app.clear_ships()
+            finally:
+                app.SYNC_STATE["running"] = False
+            self.assertEqual(len(app.list_ships({})), 1)
+
+    def test_clear_ships_reports_config_remove_failure(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {"ship_type": "战列", "rarity": "海上传奇", "tech_points": []},
+                )
+            app.write_config({"next_ship_types": ["战列"]})
+            with patch.object(
+                app.config.CONFIG_PATH.__class__,
+                "unlink",
+                side_effect=PermissionError("denied"),
+            ):
+                with self.assertRaises(ValueError):
+                    app.clear_ships()
+            self.assertEqual(len(app.list_ships({})), 1)
+            self.assertEqual(
+                app.read_config(),
+                {
+                    "next_ship_types": ["战列"],
+                    "target_limits": {
+                        "战列": {"is_idling": 1, "is_trained": 1}
+                    },
+                    "manual_targets": {},
+                },
+            )
+
+    def test_clear_ship_statuses_resets_both_fields(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {"ship_type": "战列", "rarity": "海上传奇", "tech_points": []},
+                )
+            app.update_ship_status(ship["id"], "is_trained", True)
+            cleared = app.clear_ship_statuses(ship["id"])
+            self.assertEqual(cleared, {"id": ship["id"], "is_idling": None, "is_trained": None})
+            record = app.list_ships({"name": "武藏"})[0]
+            self.assertIsNone(record["is_idling"])
+            self.assertIsNone(record["is_trained"])
+            self.assertEqual(app.list_operations()[0]["message"], "清除记录：武藏")
+            self.assertIsNone(app.clear_ship_statuses(99999))
+
+    def test_manual_targets_persist_and_drive_recommendation(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                chosen = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "青叶",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.update_ship_status(chosen["id"], "is_idling", True)
+            for ship in app.list_ships({"ship_type": "重巡"}):
+                if ship["name"] == "青叶":
+                    app.update_ship_status(ship["id"], "is_idling", True)
+            app.save_next_ship_types(["重巡"])
+            self.assertEqual(
+                app.next_ships_by_type("both", ["重巡"])[0]["train"]["name"],
+                "青叶",
+            )
+
+            config = app.toggle_manual_target("重巡", "is_trained", chosen["id"])
+            self.assertEqual(
+                config["manual_targets"], {"重巡": {"is_trained": [chosen["id"]]}}
+            )
+            config = app.read_config()
+            row = app.next_ships_by_type(
+                "both",
+                ["重巡"],
+                config["manual_targets"],
+                config["target_limits"],
+            )[0]
+            self.assertEqual(row["train"]["name"], "古鹰")
+            self.assertEqual(row["train_manual_count"], 1)
+            self.assertTrue(row["train_items"][0]["manual"])
+            self.assertEqual(row["idle_manual_count"], 0)
+
+            config = app.toggle_manual_target("重巡", "is_trained", chosen["id"])
+            self.assertEqual(config["manual_targets"], {})
+            with self.assertRaises(ValueError):
+                app.toggle_manual_target("驱逐", "is_trained", chosen["id"])
+            with self.assertRaises(ValueError):
+                app.toggle_manual_target("重巡", "is_trained", 99999)
+            with self.assertRaises(ValueError):
+                app.toggle_manual_target("重巡", "is_trained", True)
+
+    def test_target_limit_controls_manual_capacity_and_auto_fill(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ships = []
+                for name, is_idling in [
+                    ("古鹰", True),
+                    ("青叶", True),
+                    ("衣笠", True),
+                    ("加古", True),
+                ]:
+                    ship = app.insert_ship(
+                        connection,
+                        name,
+                        "2017-05-25",
+                        {
+                            "ship_type": "重巡",
+                            "rarity": "精锐",
+                            "tech_points": [
+                                {
+                                    "stage": "解锁图鉴",
+                                    "attribute": "重巡 机动",
+                                    "points": 0,
+                                }
+                            ],
+                        },
+                    )
+                    ships.append(ship)
+            for ship in ships:
+                app.update_ship_status(ship["id"], "is_idling", True)
+            app.save_next_ship_types(["重巡"])
+
+            config = app.save_target_limit("重巡", "is_trained", 3)
+            self.assertEqual(
+                config["target_limits"]["重巡"],
+                {"is_idling": 1, "is_trained": 3},
+            )
+            config = app.toggle_manual_target("重巡", "is_trained", ships[0]["id"])
+            config = app.toggle_manual_target("重巡", "is_trained", ships[1]["id"])
+            self.assertEqual(
+                app.read_config()["manual_targets"]["重巡"]["is_trained"],
+                [ships[0]["id"], ships[1]["id"]],
+            )
+            config = app.read_config()
+            row = app.next_ships_by_type(
+                "both",
+                ["重巡"],
+                config["manual_targets"],
+                config["target_limits"],
+            )[0]
+            names = [item["ship"]["name"] for item in row["train_items"]]
+            self.assertEqual(len(names), 3)
+            self.assertEqual(names[:2], ["古鹰", "青叶"])
+            self.assertEqual(
+                [item["manual"] for item in row["train_items"]],
+                [True, True, False],
+            )
+
+            config = app.toggle_manual_target("重巡", "is_trained", ships[2]["id"])
+            self.assertEqual(
+                app.read_config()["manual_targets"]["重巡"]["is_trained"],
+                [ships[0]["id"], ships[1]["id"], ships[2]["id"]],
+            )
+            with self.assertRaises(ValueError):
+                app.toggle_manual_target("重巡", "is_trained", ships[3]["id"])
+
+            config = app.save_target_limit("重巡", "is_trained", 1)
+            self.assertEqual(
+                app.read_config()["manual_targets"]["重巡"]["is_trained"],
+                [ships[0]["id"]],
+            )
+            self.assertEqual(
+                config["target_limits"]["重巡"]["is_trained"], 1
+            )
+
+    def test_save_next_ship_types_keeps_target_config(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            app.save_target_limit("重巡", "is_idling", 2)
+            app.toggle_manual_target("重巡", "is_idling", ship["id"])
+            app.save_next_ship_types(["重巡"])
+            config = app.read_config()
+            self.assertEqual(
+                config["manual_targets"], {"重巡": {"is_idling": [ship["id"]]}}
+            )
+            self.assertEqual(
+                config["target_limits"]["重巡"]["is_idling"], 2
+            )
+            app.save_next_ship_types([])
+            config = app.read_config()
+            self.assertEqual(config["manual_targets"], {})
+            self.assertEqual(config["target_limits"], {})
+
+    def test_target_limit_validation_and_stale_manual_target(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                chosen = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "青叶",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            for invalid_limit in (0, 11, -1, True, "3", 2.5):
+                with self.assertRaises(ValueError):
+                    app.save_target_limit("重巡", "is_trained", invalid_limit)
+            with self.assertRaises(ValueError):
+                app.save_target_limit("重巡", "bad_field", 2)
+            with self.assertRaises(ValueError):
+                app.save_target_limit("驱逐", "is_trained", 2)
+
+            config = app.save_target_limit("重巡", "is_trained", 10)
+            self.assertEqual(config["target_limits"]["重巡"]["is_trained"], 10)
+            app.toggle_manual_target("重巡", "is_trained", chosen["id"])
+            app.delete_ship(chosen["id"])
+
+            # 删除舰船后应同步清理悬空的手动录入，且能立刻替换录入新舰娘。
+            config = app.read_config()
+            self.assertEqual(config["manual_targets"], {})
+            replacement = app.list_ships({"ship_type": "重巡"})[0]
+            config = app.toggle_manual_target(
+                "重巡", "is_trained", replacement["id"]
+            )
+            self.assertEqual(
+                config["manual_targets"]["重巡"]["is_trained"], [replacement["id"]]
+            )
+            row = app.next_ships_by_type(
+                "both",
+                ["重巡"],
+                config["manual_targets"],
+                config["target_limits"],
+            )[0]
+            self.assertFalse(row["train_manual_stale"])
+            self.assertEqual(row["train_manual_count"], 1)
+
+    def test_completing_manual_target_releases_slot(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                chosen = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "青叶",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            app.toggle_manual_target("重巡", "is_idling", chosen["id"])
+            self.assertEqual(
+                app.read_config()["manual_targets"]["重巡"]["is_idling"],
+                [chosen["id"]],
+            )
+
+            app.update_ship_status(chosen["id"], "is_idling", True)
+            self.assertEqual(app.read_config()["manual_targets"], {})
+            config = app.read_config()
+            row = app.next_ships_by_type(
+                "both",
+                ["重巡"],
+                config["manual_targets"],
+                config["target_limits"],
+            )[0]
+            self.assertEqual(row["idle"]["name"], "青叶")
+            self.assertTrue(all(not item["manual"] for item in row["idle_items"]))
+
+    def test_concurrent_config_updates_do_not_conflict(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from unittest.mock import patch
+
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            real_write = app.config.write_config
+
+            def slow_write(config):
+                import time
+
+                time.sleep(0.02)
+                real_write(config)
+
+            with patch("blhx.config.write_config", slow_write):
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    jobs = [
+                        executor.submit(
+                            app.save_target_limit, "重巡", field, 3
+                        )
+                        for field in ("is_idling", "is_trained")
+                    ]
+                    for job in jobs:
+                        job.result()
+
+            limits = app.read_config()["target_limits"]["重巡"]
+            self.assertEqual(limits["is_idling"], 3)
+            self.assertEqual(limits["is_trained"], 3)
+
+    def test_query_filters_supports_plural_ship_types(self):
+        from unittest.mock import MagicMock
+
+        handler = app.TrackerHandler.__new__(app.TrackerHandler)
+        handler.path = "/api/ships?ship_types=%E9%87%8D%E5%B7%A1&name=%E5%8F%A4"
+        filters = handler.query_filters()
+        self.assertEqual(filters["ship_types"], ["重巡"])
+        self.assertEqual(filters["name"], "古")
+
+        handler.path = "/api/ships?ship_type=%E6%88%98%E5%88%97"
+        self.assertEqual(handler.query_filters()["ship_types"], ["战列"])
+
+        handler.path = "/api/ships"
+        self.assertNotIn("ship_types", handler.query_filters())
+
+    def test_training_completion_releases_idle_slot(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                chosen = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "青叶",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            app.toggle_manual_target("重巡", "is_idling", chosen["id"])
+            app.update_ship_status(chosen["id"], "is_trained", True)
+            # 练级完成会同时把挂机置为完成，挂机名额必须一并释放。
+            self.assertEqual(app.read_config()["manual_targets"], {})
+
+            replacement = [
+                ship for ship in app.list_ships({"ship_type": "重巡"})
+                if ship["name"] == "青叶"
+            ][0]
+            config = app.toggle_manual_target(
+                "重巡", "is_idling", replacement["id"]
+            )
+            self.assertEqual(
+                config["manual_targets"]["重巡"]["is_idling"],
+                [replacement["id"]],
+            )
+
+    def test_completed_ship_rejected_as_manual_target(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                done = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            app.update_ship_status(done["id"], "is_trained", True)
+            with self.assertRaises(ValueError):
+                app.toggle_manual_target("重巡", "is_trained", done["id"])
+
+    def test_release_manual_target_uses_config_lock(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from unittest.mock import patch
+
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            app.toggle_manual_target("重巡", "is_idling", ship["id"])
+            real_write = app.config.write_config
+
+            def slow_write(config):
+                import time
+
+                time.sleep(0.05)
+                real_write(config)
+
+            with patch("blhx.config.write_config", slow_write):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = [
+                        executor.submit(app.release_manual_target, ship["id"]),
+                        executor.submit(
+                            app.save_target_limit, "重巡", "is_trained", 3
+                        ),
+                    ]
+                    for future in futures:
+                        future.result()
+
+            config = app.read_config()
+            self.assertEqual(config["target_limits"]["重巡"]["is_trained"], 3)
+            self.assertEqual(config["manual_targets"], {})
+
+    def test_clear_ships_serialized_with_config_writes(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from unittest.mock import patch
+
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            app.save_next_ship_types(["重巡"])
+            real_write = app.config.write_config
+
+            def slow_write(config):
+                import time
+
+                time.sleep(0.05)
+                real_write(config)
+
+            with patch("blhx.config.write_config", slow_write):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = [
+                        executor.submit(app.save_target_limit, "重巡", "is_trained", 3),
+                        executor.submit(app.clear_ships),
+                    ]
+                    for future in futures:
+                        future.result()
+
+            # 无论谁先执行，清空后配置都必须回到空；不允许旧快照把配置写回来。
+            config = app.read_config()
+            if app.list_ships({}):
+                self.assertEqual(config["target_limits"]["重巡"]["is_trained"], 3)
+            else:
+                self.assertEqual(config, {"next_ship_types": [], "target_limits": {}, "manual_targets": {}})
+
+    def test_page_script_conflict_and_safety_guards(self):
+        html = app.PAGE_HTML
+        # 属性注入防护
+        self.assertIn("const escapeAttr = value =>", html)
+        self.assertNotIn('data-name="${escapeHtml(', html)
+        self.assertNotIn('data-id="${escapeHtml(', html)
+        # 自动保存与通知
+        self.assertIn("showToast('推荐舰种已更新')", html)
+        self.assertNotIn("confirmNextButton", html)
+        # 串行保存与配置回读保护
+        self.assertIn("function syncNextTypes()", html)
+        self.assertIn("const stale = versionAtStart !== selectionVersion;", html)
+        self.assertIn("applyRemoteConfig(result, stale || typesDirty || hadPendingSave);", html)
+        # 推荐舰种顺序与空行隐藏
+        self.assertIn("function recommendSortKey(shipType) {", html)
+        self.assertIn("recommend_ship_types", html)
+        self.assertIn("function rowHasTargets(row) {", html)
+        self.assertIn("所选舰种暂无可推荐舰娘", html)
+        # 全量导入完成后整页刷新（独立于局部回读的成功/失败）
+        self.assertIn("function scheduleImportReload(objectUrl)", html)
+        self.assertIn("setTimeout(() => window.location.reload(), 1200);", html)
+        self.assertIn("      if (!imported) return;\n      // 服务端已完成写入", html)
+        # 表格按钮顺序
+        idle = html.index(">已挂机</button>")
+        trained = html.index(">已练级</button>")
+        clear = html.index(">清除数据</button>")
+        delete = html.index(">删除</button>", clear)
+        self.assertLess(idle, trained)
+        self.assertLess(trained, clear)
+        self.assertLess(clear, delete)
+
+    def test_import_triggers_full_page_reload(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("未安装 node，跳过前端导入刷新回归")
+        fixture = Path(__file__).with_name("fixtures") / "import_reload.mjs"
+        result = subprocess.run(
+            [node, str(fixture)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(Path(fixture).resolve().parents[2]),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("断言: true", result.stdout)
+
+    def test_config_race_handles_late_get(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("未安装 node，跳过前端竞态回归")
+        fixture = Path(__file__).with_name("fixtures") / "config_race.mjs"
+        result = subprocess.run(
+            [node, str(fixture)], capture_output=True, text=True, timeout=60
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("断言A: true", result.stdout)
+        self.assertIn("断言B: true", result.stdout)
+
+    def test_recommend_order_and_empty_types_hidden(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                for name, ship_type in [
+                    ("运输一", "运输"),
+                    ("轻巡一", "轻巡"),
+                    ("驱逐一", "驱逐"),
+                    ("轻航一", "轻航"),
+                    ("战列一", "战列"),
+                    ("重炮一", "重炮"),
+                ]:
+                    app.insert_ship(
+                        connection,
+                        name,
+                        "2024-01-01",
+                        {
+                            "ship_type": ship_type,
+                            "rarity": "精锐",
+                            "tech_points": [
+                                {
+                                    "stage": "解锁图鉴",
+                                    "attribute": f"{ship_type} 耐久",
+                                    "points": 0,
+                                }
+                            ],
+                        },
+                    )
+            rows = app.next_ships_by_type(
+                "both",
+                ["运输", "轻巡", "驱逐", "轻航", "战列", "重炮"],
+            )
+            self.assertEqual(
+                [row["ship_type"] for row in rows],
+                ["战列", "轻航", "轻巡", "驱逐", "运输", "重炮"],
+            )
+
+    def test_recommend_normalizes_ship_type_aliases(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "皇家财富号",
+                    "2024-01-01",
+                    {
+                        "ship_type": "风帆S",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "风帆 耐久", "points": 0}
+                        ],
+                    },
+                )
+            rows = app.next_ships_by_type(
+                "both", ["风帆M", "风帆S", "风帆"]
+            )
+            self.assertEqual([row["ship_type"] for row in rows], ["风帆"])
+
+    def test_recommend_hides_ship_types_without_targets(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                only_idle = app.insert_ship(
+                    connection,
+                    "战列一",
+                    "2024-01-01",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "战列 耐久", "points": 0}
+                        ],
+                    },
+                )
+                idle_and_train = app.insert_ship(
+                    connection,
+                    "重巡一",
+                    "2024-01-01",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 耐久", "points": 0}
+                        ],
+                    },
+                )
+                idle_and_train_2 = app.insert_ship(
+                    connection,
+                    "重巡二",
+                    "2024-01-02",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 耐久", "points": 0}
+                        ],
+                    },
+                )
+                app.insert_ship(
+                    connection,
+                    "驱逐一",
+                    "2024-01-01",
+                    {
+                        "ship_type": "驱逐",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "驱逐 耐久", "points": 0}
+                        ],
+                    },
+                )
+            # 重巡全部已完成，两个模式都无候选，不应出现在结果中。
+            app.update_ship_status(idle_and_train["id"], "is_trained", True)
+            app.update_ship_status(idle_and_train_2["id"], "is_trained", True)
+            app.update_ship_status(only_idle["id"], "is_idling", True)
+            # both 模式下只要任一模式有目标就保留；重巡两个模式都为空必须被过滤。
+            rows = app.next_ships_by_type("both", ["战列", "重巡", "驱逐"])
+            self.assertEqual([row["ship_type"] for row in rows], ["战列", "驱逐"])
+            self.assertTrue(rows[0]["train_items"])
+            self.assertFalse(rows[0]["idle_items"])
+
+            # 战列已挂机，idle 模式没有目标项，应被隐藏；重巡仍为空被过滤。
+            rows = app.next_ships_by_type("idle", ["战列", "重巡", "驱逐"])
+            self.assertEqual([row["ship_type"] for row in rows], ["驱逐"])
+            self.assertTrue(rows[0]["idle_items"])
+
+            # train 模式：驱逐仍在练级候选内，战列已完成练级? 用实际状态校验空行过滤。
+            rows = app.next_ships_by_type("train", ["战列", "重巡", "驱逐"])
+            self.assertNotIn("重巡", [row["ship_type"] for row in rows])
+            for row in rows:
+                self.assertTrue(row["train_items"])
+
+    def test_init_db_migration_is_atomic(self):
+        from unittest.mock import patch
+
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                connection.execute("DROP TABLE tech_points")
+                connection.execute(
+                    """
+                    CREATE TABLE tech_points (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ship_id INTEGER NOT NULL REFERENCES ships(id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL,
+                        attribute TEXT NOT NULL DEFAULT '',
+                        points INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(ship_id, stage, attribute)
+                    )
+                    """
+                )
+                ship = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {"ship_type": "重巡", "rarity": "精锐", "tech_points": []},
+                )
+                connection.execute(
+                    """
+                    INSERT INTO tech_points (ship_id, stage, attribute, points)
+                    VALUES (?, '解锁图鉴', '重巡 机动', 0)
+                    """,
+                    (ship["id"],),
+                )
+
+            with patch(
+                "blhx.tech.parse_tech_attribute",
+                side_effect=RuntimeError("boom"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    app.init_db()
+
+            with app.get_connection() as connection:
+                columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(tech_points)"
+                    ).fetchall()
+                }
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM tech_points"
+                ).fetchone()[0]
+            # 迁移失败时必须回滚到旧表，记录不能丢。
+            self.assertNotIn("bonus_ship_type", columns)
+            self.assertEqual(count, 1)
+
+            app.init_db()
+            ships = app.list_ships({"name": "古鹰"})
+            self.assertEqual(ships[0]["tech_points"][0]["bonus_ship_type"], "重巡")
+
+    def test_init_db_rebuilds_legacy_tech_points_table(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                connection.execute("DROP TABLE tech_points")
+                connection.execute(
+                    """
+                    CREATE TABLE tech_points (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ship_id INTEGER NOT NULL REFERENCES ships(id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL,
+                        attribute TEXT NOT NULL DEFAULT '',
+                        points INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(ship_id, stage, attribute)
+                    )
+                    """
+                )
+                ship = app.insert_ship(
+                    connection,
+                    "金鹿号",
+                    "2024-01-01",
+                    {
+                        "ship_type": "风帆V",
+                        "rarity": "精锐",
+                        "tech_points": [],
+                    },
+                )
+                connection.execute(
+                    """
+                    INSERT INTO tech_points (ship_id, stage, attribute, points)
+                    VALUES (?, '解锁图鉴', '风帆 命中', 0)
+                    """,
+                    (ship["id"],),
+                )
+
+            app.init_db()
+            with app.get_connection() as connection:
+                columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(tech_points)"
+                    ).fetchall()
+                }
+                self.assertIn("bonus_ship_type", columns)
+                self.assertIn("bonus_attribute", columns)
+            ships = app.list_ships({"ship_type": "风帆"})
+            self.assertEqual([ship["name"] for ship in ships], ["金鹿号"])
+            self.assertEqual(ships[0]["tech_points"][0]["bonus_ship_type"], "风帆")
+            self.assertEqual(ships[0]["tech_points"][0]["bonus_attribute"], "命中")
+
+    def test_clear_ships_clears_config_logs_and_sequences(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "战列 耐久", "points": 0}
+                        ],
+                    },
+                )
+            app.update_ship_status(ship["id"], "is_idling", True)
+            app.write_config({"next_ship_types": ["战列"]})
+            self.assertTrue(app.config.CONFIG_PATH.exists())
+
+            self.assertEqual(app.clear_ships(), 1)
+            self.assertFalse(app.config.CONFIG_PATH.exists())
+            self.assertEqual(
+                app.read_config(),
+                {"next_ship_types": [], "target_limits": {}, "manual_targets": {}},
+            )
+            with app.get_connection() as connection:
+                for table in ("ships", "tech_points", "operation_logs"):
+                    self.assertEqual(
+                        connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
+                        0,
+                    )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM sqlite_sequence").fetchone()[0],
+                    0,
+                )
+            self.assertEqual(app.SYNC_STATE["status"], "未开始")
 
 
 if __name__ == "__main__":
