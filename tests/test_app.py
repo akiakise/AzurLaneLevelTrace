@@ -609,6 +609,51 @@ class AppTests(unittest.TestCase):
                 (app.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip(),
             )
 
+    def test_bump_version_script(self):
+        import os
+        import subprocess
+        import tempfile
+
+        script = Path(__file__).resolve().parent.parent / "bump_version.sh"
+        self.assertTrue(script.is_file())
+
+        def run(args, version, answers=None):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                target = Path(temp_dir) / "VERSION"
+                target.write_text(version + "\n", encoding="utf-8")
+                env = dict(os.environ, VERSION_FILE=str(target))
+                result = subprocess.run(
+                    [str(script), *args],
+                    input=answers,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                return result, target.read_text(encoding="utf-8")
+
+        result, content = run(["patch", "-y"], "1.0.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(content, "1.0.2\n")
+        self.assertEqual(run(["minor", "-y"], "1.9.9")[1], "1.10.0\n")
+        self.assertEqual(run(["major", "-y"], "1.9.9")[1], "2.0.0\n")
+        self.assertEqual(run(["patch", "-y"], "9.9.9")[1], "9.9.10\n")
+
+        result, content = run([], "1.4.2", "2\ny\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(content, "2.0.0\n")
+
+        result, content = run([], "1.4.2", "1\nn\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(content, "1.4.2\n")
+
+        result, content = run(["minor", "-y"], "1.2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(content, "1.2\n")
+
+        result, content = run(["unknown"], "1.2.3")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(content, "1.2.3\n")
+
     def test_tech_attribute_matches_each_ship_type(self):
         with isolated_app_data():
             with app.get_connection() as connection:

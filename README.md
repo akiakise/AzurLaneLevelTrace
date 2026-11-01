@@ -28,6 +28,7 @@ SQLite 数据库
 ```text
 .
 ├── app.py                     # 兼容入口与统一导出
+├── bump_version.sh            # 本地版本号升级脚本
 ├── blhx/
 │   ├── __init__.py
 │   ├── core/                  # 通用基础设施
@@ -465,7 +466,22 @@ curl -s http://localhost:8000/api/version
 
 发版步骤：
 
-1. 本地修改 `VERSION`，例如 `1.0.0` → `1.0.1`。
+1. 本地升级版本号，用内置脚本交互选择大版本或小版本：
+
+```bash
+./bump_version.sh
+```
+
+脚本会展示当前版本与升级后的版本，确认后只修改 `VERSION`，不会自动提交；也可以直接指定类型或跳过确认：
+
+```bash
+./bump_version.sh minor      # 小版本：1.0.1 -> 1.1.0
+./bump_version.sh major      # 大版本：1.0.1 -> 2.0.0
+./bump_version.sh patch -y   # 修订版本：1.0.1 -> 1.0.2，不询问
+```
+
+脚本只依赖 `bash`，大版本会归零 minor 与 patch，小版本会归零 patch；`VERSION` 格式不合法时直接报错且不改动文件。
+
 2. 提交并推送到 `main`。
 3. GitHub Actions 读取 `VERSION` 构建 `linux/amd64,linux/arm64` 多架构镜像，推送 `akise/azur-lane-level-trace:latest` 与 `akise/azur-lane-level-trace:<VERSION>` 两个标签。
 4. 同时创建 Git 标签 `v<VERSION>` 与同名 GitHub Release，Release 说明自动按提交记录生成。
