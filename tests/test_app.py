@@ -1825,10 +1825,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("setTimeout(() => window.location.reload(), 1200);", html)
         self.assertIn("scheduleImportReload();", html)
         self.assertIn('id="syncDownload"', html)
-        self.assertIn("setSyncModalMode('import')", html)
+        self.assertIn("beginProgress('import',", html)
         # 表格按钮顺序
-        idle = html.index(">已挂机</button>")
-        trained = html.index(">已练级</button>")
+        idle = html.index(">挂机完成</button>")
+        trained = html.index(">练级完成</button>")
         clear = html.index(">清除数据</button>")
         delete = html.index(">删除</button>", clear)
         self.assertLess(idle, trained)
@@ -1885,6 +1885,24 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("断言A: true", result.stdout)
         self.assertIn("断言B: true", result.stdout)
+
+    def test_page_writes_keep_loading_until_refresh_finishes(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("未安装 node，跳过前端写操作 loading 回归")
+        fixture = Path(__file__).with_name("fixtures") / "page_loading.mjs"
+        result = subprocess.run(
+            [node, str(fixture)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(Path(fixture).resolve().parents[2]),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("断言: true", result.stdout)
 
     def test_recommend_order_and_empty_types_hidden(self):
         with isolated_app_data():

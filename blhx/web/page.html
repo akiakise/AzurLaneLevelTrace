@@ -12,7 +12,7 @@
     html { -webkit-text-size-adjust:100%; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; }
     body.loading { overflow:hidden; cursor:progress; user-select:none; }
-    body.loading button:not(.sync-close), body.loading input, body.loading select { pointer-events:none; opacity:.6; }
+    body.loading .container, body.loading .modal-overlay { pointer-events:none; }
     .container { max-width:1500px; margin:0 auto; padding:28px 24px 60px; }
     header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
     h1 { font-size:26px; margin:0; }
@@ -105,6 +105,10 @@
     .modal-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
     .sync-overlay { display:none; position:fixed; inset:0; z-index:100; align-items:center; justify-content:center; padding:20px; background:rgba(8,13,25,.76); backdrop-filter:blur(3px); }
     .sync-overlay.active { display:flex; }
+    .loading-overlay { display:none; position:fixed; inset:0; z-index:110; align-items:center; justify-content:center; padding:20px; background:rgba(8,13,25,.76); backdrop-filter:blur(3px); cursor:progress; }
+    .loading-overlay.active { display:flex; }
+    .loading-panel { display:flex; align-items:center; gap:14px; max-width:100%; padding:22px 26px; background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:0 18px 48px rgba(0,0,0,.35); }
+    .loading-panel .spinner { flex-shrink:0; }
     .sync-modal { width:min(520px,92vw); background:linear-gradient(180deg,var(--panel),#131d34); border:1px solid var(--line); border-radius:14px; padding:24px; box-shadow:0 18px 48px rgba(0,0,0,.35); }
     .sync-title-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
     .sync-title-row h2 { font-size:19px; margin:0; }
@@ -172,8 +176,14 @@
   </style>
 </head>
 <body>
+  <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
+    <div class="loading-panel">
+      <div class="spinner" aria-hidden="true"></div>
+      <span id="loadingMessage">正在保存，请稍候…</span>
+    </div>
+  </div>
   <div id="syncOverlay" class="sync-overlay">
-    <div class="sync-modal" role="dialog" aria-modal="true" aria-labelledby="syncTitle" aria-live="polite">
+    <div class="sync-modal" role="dialog" aria-modal="true" aria-labelledby="syncTitle" aria-live="polite" tabindex="-1">
       <div class="sync-title-row">
         <h2 id="syncTitle">同步进度</h2>
         <div id="syncSpinner" class="spinner" hidden></div>
@@ -351,11 +361,71 @@
     const statusClass = value => value === true ? 'yes' : value === false ? 'no' : 'empty';
     const statusText = value => value === true ? '是' : value === false ? '否' : '';
 
+    const pageLoads = new Map();
+    let progressLoading = false;
+    let progressMode = null;
+    let progressVersion = 0;
+    let loadingFocus = null;
+
+    function updatePageLoading() {
+      const busy = pageLoads.size > 0 || progressLoading;
+      const wasBusy = document.body.classList.contains('loading');
+      if (busy && !wasBusy) loadingFocus = document.activeElement;
+      document.body.classList.toggle('loading', busy);
+      document.body.setAttribute('aria-busy', String(busy));
+      document.querySelectorAll('.container, .modal-overlay').forEach(element => {
+        element.inert = busy;
+      });
+      const overlay = document.getElementById('loadingOverlay');
+      const showLoading = pageLoads.size > 0 && !progressLoading;
+      overlay.classList.toggle('active', showLoading);
+      document.getElementById('loadingMessage').textContent =
+        pageLoads.values().next().value || '正在保存，请稍候…';
+      document.getElementById('syncClose').disabled = busy;
+      document.getElementById('syncSpinner').hidden = !progressLoading;
+      ['syncButton', 'partialSyncButton', 'importButton'].forEach(id => {
+        document.getElementById(id).disabled = busy;
+      });
+      if (busy) {
+        const focusTarget = showLoading ? overlay : document.querySelector('.sync-modal');
+        if (!focusTarget.contains(document.activeElement)) focusTarget.focus();
+      } else if (wasBusy) {
+        if (loadingFocus && loadingFocus.isConnected && !loadingFocus.closest('[inert]')) {
+          loadingFocus.focus();
+        }
+        loadingFocus = null;
+      }
+    }
+
+    function beginPageLoading(message) {
+      const token = Symbol('loading');
+      pageLoads.set(token, message);
+      updatePageLoading();
+      return () => {
+        pageLoads.delete(token);
+        updatePageLoading();
+      };
+    }
+
+    // inert 阻止背景鼠标与键盘操作；加载时也不允许焦点从遮罩移走。
+    document.addEventListener('keydown', event => {
+      if ((pageLoads.size || progressLoading) && ['Tab', 'Enter', ' ', 'Escape'].includes(event.key)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    }, true);
+
     async function requestJson(url, options = {}) {
-      const response = await fetch(url, options);
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || response.statusText);
-      return result;
+      const writing = !['GET', 'HEAD'].includes((options.method || 'GET').toUpperCase());
+      const finishLoading = writing ? beginPageLoading('正在保存，请稍候…') : null;
+      try {
+        const response = await fetch(url, options);
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || response.statusText);
+        return result;
+      } finally {
+        if (finishLoading) finishLoading();
+      }
     }
 
     function showToast(text, isError = false) {
@@ -406,10 +476,10 @@
           .join('、') || '无';
         const actionButtons = [];
         if (ship.is_idling !== true) {
-          actionButtons.push(`<button type="button" data-action="is_idling" data-id="${escapeAttr(ship.id)}">已挂机</button>`);
+          actionButtons.push(`<button type="button" data-action="is_idling" data-id="${escapeAttr(ship.id)}">挂机完成</button>`);
         }
         if (ship.is_trained !== true) {
-          actionButtons.push(`<button type="button" data-action="is_trained" data-id="${escapeAttr(ship.id)}">已练级</button>`);
+          actionButtons.push(`<button type="button" data-action="is_trained" data-id="${escapeAttr(ship.id)}">练级完成</button>`);
         }
         if (ship.is_idling !== null || ship.is_trained !== null) {
           actionButtons.push(`<button type="button" data-clear-status data-id="${escapeAttr(ship.id)}" data-name="${escapeAttr(ship.name)}">清除数据</button>`);
@@ -573,6 +643,7 @@
     }
 
     async function completeShipStatus(shipId, field) {
+      const finishLoading = beginPageLoading(field === 'is_idling' ? '正在标记挂机完成…' : '正在标记练级完成…');
       try {
         await requestJson('/api/ship/status', {
           method: 'POST',
@@ -585,10 +656,13 @@
         await refreshNextOptions(true);
       } catch (error) {
         showMessage(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
     async function clearShipStatus(shipId, shipName) {
+      const finishLoading = beginPageLoading('正在清除舰娘状态…');
       try {
         await requestJson('/api/ship/clear-status', {
           method: 'POST',
@@ -601,6 +675,8 @@
         await refreshNextOptions(true);
       } catch (error) {
         showToast(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
@@ -657,6 +733,7 @@
     }
 
     async function togglePickerShip(shipId, shipName) {
+      const finishLoading = beginPageLoading('正在保存手动录入…');
       try {
         const result = await requestJson('/api/manual-target', {
           method: 'POST',
@@ -676,6 +753,8 @@
         await loadPickerShips();
       } catch (error) {
         showToast(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
@@ -683,6 +762,7 @@
       const current = ((targetLimits[shipType] || {})[field]) || 1;
       const next = current + delta;
       if (next < 1 || next > 10) return;
+      const finishLoading = beginPageLoading('正在保存目标数量…');
       try {
         const result = await requestJson('/api/target-limit', {
           method: 'POST',
@@ -694,10 +774,13 @@
         await loadNextTargets();
       } catch (error) {
         showToast(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
     async function removeManualTarget(shipType, field, shipId) {
+      const finishLoading = beginPageLoading('正在取消手动录入…');
       try {
         const result = await requestJson('/api/manual-target', {
           method: 'POST',
@@ -710,12 +793,15 @@
         await loadNextTargets();
       } catch (error) {
         showToast(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
     async function clearShipPickerTarget() {
       const { shipType, field } = pickerState;
       if (!shipType) return;
+      const finishLoading = beginPageLoading('正在清空手动录入…');
       try {
         const result = await requestJson('/api/manual-target', {
           method: 'POST',
@@ -729,10 +815,13 @@
         await loadPickerShips();
       } catch (error) {
         showToast(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
     async function deleteShip(shipId, shipName) {
+      const finishLoading = beginPageLoading('正在删除舰娘…');
       try {
         await requestJson('/api/ship/delete', {
           method: 'POST',
@@ -745,6 +834,8 @@
         await refreshNextOptions(true);
       } catch (error) {
         showMessage(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
@@ -777,6 +868,7 @@
     }
 
     async function confirmClearShips() {
+      const finishLoading = beginPageLoading('正在清空数据…');
       try {
         const result = await requestJson('/api/ships/clear', {
           method: 'POST',
@@ -790,12 +882,14 @@
         manualTargets = {};
         targetLimits = {};
         showMessage(`已清空 ${result.count} 个舰娘`);
-        resetFilters();
+        await resetFilters();
         renderNextTypes();
         renderNextTargets();
       } catch (error) {
         cancelClearShips();
         showMessage(error.message, true);
+      } finally {
+        finishLoading();
       }
     }
 
@@ -952,22 +1046,48 @@
     }
 
     async function refreshSyncStatus() {
+      if (progressMode === 'import') return;
+      const version = progressVersion;
+      let taskFinished = false;
       try {
         const result = await requestJson('/api/sync/status');
+        if (version !== progressVersion || progressMode === 'import') return;
+        if (result.running) {
+          progressMode = 'sync';
+          progressLoading = true;
+          showSyncOverlay();
+        }
         updateSyncModal({ ...result, mode: 'sync' });
         if (result.running) {
-          setTimeout(refreshSyncStatus, 1000);
+          setTimeout(() => {
+            if (version === progressVersion) refreshSyncStatus();
+          }, 1000);
           return;
         }
+        taskFinished = true;
         if (result.status === '完成') {
           await loadShips();
+          if (version !== progressVersion) return;
           await refreshNextOptions(true);
-          if (!result.errors.length) setTimeout(() => closeSyncOverlay(), 2200);
+        }
+        if (version !== progressVersion) return;
+        finishProgress();
+        if (result.status === '完成' && !result.errors.length) {
+          setTimeout(() => {
+            if (version === progressVersion) closeSyncOverlay();
+          }, 2200);
         }
       } catch (error) {
+        if (version !== progressVersion || progressMode === 'import') return;
         showMessage(error.message, true);
-        if (document.getElementById('syncOverlay').classList.contains('active')) {
-          setTimeout(refreshSyncStatus, 2000);
+        if (taskFinished) {
+          document.getElementById('syncMessage').textContent = `同步已结束，页面数据刷新失败：${error.message}`;
+          finishProgress();
+        } else if (progressLoading) {
+          document.getElementById('syncMessage').textContent = '获取同步进度失败，正在重试…';
+          setTimeout(() => {
+            if (version === progressVersion) refreshSyncStatus();
+          }, 2000);
         }
       }
     }
@@ -983,9 +1103,7 @@
           showMessage('请输入要同步的舰娘名称', true);
           return;
         }
-        showSyncOverlay();
-        document.body.classList.add('loading');
-        document.getElementById('syncButton').disabled = true;
+        beginProgress('sync', targetNames ? '正在启动少量同步…' : '正在启动全量同步…');
         await requestJson('/api/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -998,9 +1116,7 @@
         );
         refreshSyncStatus();
       } catch (error) {
-        document.body.classList.remove('loading');
-        document.getElementById('syncButton').disabled = false;
-        document.getElementById('partialSyncButton').disabled = false;
+        finishProgress();
         closeSyncOverlay();
         showMessage(error.message, true);
       }
@@ -1011,7 +1127,22 @@
     }
 
     function closeSyncOverlay() {
+      if (progressLoading || pageLoads.size) return;
       document.getElementById('syncOverlay').classList.remove('active');
+    }
+
+    function beginProgress(mode, message) {
+      progressVersion += 1;
+      progressMode = mode;
+      progressLoading = true;
+      showSyncOverlay();
+      updateSyncModal({ mode, running: true, status: '准备中', message, total: 0, processed: 0, skipped: 0, errors: [] });
+    }
+
+    function finishProgress() {
+      progressLoading = false;
+      progressMode = null;
+      updatePageLoading();
     }
 
     function updateSyncModal(result) {
@@ -1035,13 +1166,7 @@
       document.getElementById('syncErrorCount').textContent = result.errors.length;
       document.getElementById('syncErrors').innerHTML = errors;
       document.getElementById('syncErrors').hidden = !errors;
-      document.getElementById('syncSpinner').hidden = !result.running;
-      document.getElementById('syncClose').disabled = result.running;
-      document.getElementById('syncButton').disabled = result.running;
-      document.getElementById('partialSyncButton').disabled = result.running;
-      document.getElementById('importButton').disabled = result.running;
-      document.body.classList.toggle('loading', result.running);
-      if (result.running) showSyncOverlay();
+      updatePageLoading();
     }
 
     async function importCsv(input) {
@@ -1050,10 +1175,6 @@
       const form = new FormData();
       form.append('file', file);
       showImportOverlay();
-      document.body.classList.add('loading');
-      document.getElementById('importButton').disabled = true;
-      document.getElementById('syncButton').disabled = true;
-      document.getElementById('partialSyncButton').disabled = true;
       try {
         const response = await fetch('/api/import', { method: 'POST', body: form });
         const result = await response.json().catch(() => ({}));
@@ -1074,20 +1195,7 @@
 
     function showImportOverlay() {
       importDownloadDone = false;
-      setSyncModalMode('import');
-      document.getElementById('syncMessage').textContent = '正在读取 CSV 文件';
-      document.getElementById('syncPercent').textContent = '0%';
-      document.getElementById('syncProgressBar').style.width = '0%';
-      document.getElementById('syncCount').textContent = '0 / 0';
-      document.getElementById('syncProcessed').textContent = '0';
-      document.getElementById('syncSkipped').textContent = '0';
-      document.getElementById('syncErrorCount').textContent = '0';
-      document.getElementById('syncErrors').innerHTML = '';
-      document.getElementById('syncErrors').hidden = true;
-      document.getElementById('syncDownload').hidden = true;
-      document.getElementById('syncClose').disabled = true;
-      document.getElementById('syncSpinner').hidden = false;
-      showSyncOverlay();
+      beginProgress('import', '正在读取 CSV 文件…');
     }
 
     function setSyncModalMode(mode) {
@@ -1100,10 +1208,7 @@
     }
 
     function finishImportInteraction() {
-      document.body.classList.remove('loading');
-      document.getElementById('importButton').disabled = false;
-      document.getElementById('syncButton').disabled = false;
-      document.getElementById('partialSyncButton').disabled = false;
+      finishProgress();
     }
 
     async function refreshImportStatus() {
@@ -1145,11 +1250,13 @@
       // 导入完成后整页刷新，避免前端残留筛选状态与数据库不一致。
       // 刷新窗口内保持按钮禁用，避免启动新任务后被旧定时器刷新打断。
       // 稍等再刷新，避免结果文件下载被中断。
-      document.body.classList.add('loading');
+      progressLoading = true;
+      document.getElementById('syncMessage').textContent = '已触发结果下载，正在刷新页面…';
+      updatePageLoading();
       setTimeout(() => window.location.reload(), 1200);
     }
 
-    function resetFilters() {
+    async function resetFilters() {
       filterState.name = '';
       filterState.ship_type = '';
       filterState.rarity = '';
@@ -1160,7 +1267,7 @@
       filterState.is_trained = '';
       document.getElementById('fName').value = '';
       renderFilters();
-      loadShips();
+      await loadShips();
     }
 
     async function initialize() {
@@ -1222,6 +1329,7 @@
         pendingTypesSave.queued = true;
         return pendingTypesSave.promise;
       }
+      const finishLoading = beginPageLoading('正在保存推荐舰种…');
       const job = { queued: false, promise: null };
       job.promise = (async () => {
         try {
@@ -1247,6 +1355,7 @@
           renderNextTypes();
         } finally {
           if (pendingTypesSave === job) pendingTypesSave = null;
+          finishLoading();
         }
       })();
       pendingTypesSave = job;
