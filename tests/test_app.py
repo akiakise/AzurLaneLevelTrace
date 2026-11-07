@@ -1966,6 +1966,25 @@ class AppTests(unittest.TestCase):
         self.assertIn(".tab-panel[hidden] { display:none; }", html)
         self.assertIn('.tab[aria-selected="true"]', html)
 
+    def test_page_tabs_mobile_friendly(self):
+        html = app.PAGE_HTML
+        mobile = html[html.index("@media (max-width:820px)"):html.index("</style>")]
+        # 窄屏三个 Tab 等分并可横向滚动，避免中文标签挤在一起或撑破页面。
+        self.assertIn(".tabs { gap:6px; overflow-x:auto;", mobile)
+        self.assertIn(".tab { flex:1 0 auto; min-width:0;", mobile)
+        self.assertIn(".tabs::-webkit-scrollbar { display:none; }", mobile)
+        # 刘海屏横屏时左右安全区，避免 Tab 与卡片贴边或压到圆角区域。
+        self.assertIn("padding:18px max(12px,env(safe-area-inset-right))", mobile)
+        self.assertIn("env(safe-area-inset-left)", mobile)
+        # 触屏没有真实悬停，hover 样式只在支持悬停的设备生效，避免选中态粘连。
+        self.assertIn("@media (hover:hover) { .tab:hover {", html)
+        # <a class="button"> 在工具栏拉伸时文字必须居中，否则小屏会贴左。
+        self.assertIn("a.button { display:inline-flex; align-items:center; justify-content:center;", html)
+        self.assertIn(".toolbar > button, .toolbar > .button { width:100%;", mobile)
+        # 切换 Tab 回到顶部，解决移动端长列表滚到底后切换看到空白的问题。
+        self.assertIn("if (changed && window.scrollTo) window.scrollTo(0, 0);", html)
+        self.assertIn("const changed = activeTab !== target.tab;", html)
+
     def test_page_tab_switching(self):
         import shutil
         import subprocess

@@ -77,6 +77,18 @@ function assertActive(h, expected) {
   assert.equal(h.document.activeElement, focusBeforeClick, '点击切换不抢焦点');
 }
 
+// 切换 Tab 时回到页面顶部，避免移动端长列表滚到底后看到空白；重复点当前 Tab 不重置滚动。
+{
+  const h = createHarness();
+  h.api.switchTab('recommend');
+  assert.equal(h.scrolls.length, 0, '首次渲染不改变滚动位置');
+  h.api.switchTab('training');
+  assert.deepEqual(h.scrolls.at(-1), { x: 0, y: 0 });
+  const count = h.scrolls.length;
+  h.api.switchTab('training');
+  assert.equal(h.scrolls.length, count, '点当前 Tab 不重置滚动');
+}
+
 // hashchange 时同步切换，支持浏览器前进/后退。
 {
   const h = createHarness();

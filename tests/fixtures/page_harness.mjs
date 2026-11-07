@@ -73,6 +73,7 @@ export function createHarness() {
     dispatch: (name, event) => documentListeners.get(name)?.(event),
   };
   const windowListeners = new Map();
+  const scrolls = [];
   // 极简地址栏：replaceState 写入 pathname/hash，并同步暴露给被测脚本。
   const location = { pathname: '/', hash: '' };
   const sandbox = {
@@ -87,6 +88,7 @@ export function createHarness() {
           location.hash = index >= 0 ? text.slice(index) : '';
         },
       },
+      scrollTo: (x, y) => scrolls.push({ x, y }),
       addEventListener: (name, callback) => windowListeners.set(name, callback),
       dispatch: (name, event) => windowListeners.get(name)?.(event),
     },
@@ -154,5 +156,5 @@ export function createHarness() {
     assert.equal(element('loadingOverlay').classList.contains('active'), generic, '普通写操作遮罩');
     if (expected) assert.equal(document.body.getAttribute('aria-busy'), 'true');
   }
-  return { api, document, window: sandbox.window, location, element, requests, pending, events, timers, reply, runTimer, finishReads, assertBusy };
+  return { api, document, window: sandbox.window, location, scrolls, element, requests, pending, events, timers, reply, runTimer, finishReads, assertBusy };
 }
