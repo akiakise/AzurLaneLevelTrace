@@ -37,12 +37,12 @@ def tech_priority_rank(ship: dict[str, Any]) -> int:
     return min(ranks) if ranks else len(DEFAULT_TECH_PRIORITY) + 1
 
 
-def available_next_ship_types() -> list[dict[str, Any]]:
-    """可配置的推荐舰种。
+def _pending_ship_type_counts() -> dict[str, dict[str, int]]:
+    """按舰种统计待挂机与待练级数量。
 
-    可选范围只取决于舰种常量全集，与数据库当前是否有可练级舰娘无关：
-    舰种可以先行配置，等后续同步或导入出新的可练级舰船后自动参与推荐。
-    当前没有候选时计数为 0，页面照常展示 0 / 0。
+    口径与推荐候选一致：只看需要练级且尚未练级的舰船。
+    待挂机 = 其中还没挂机的，待练级 = 其中已经挂机、等待练级的。
+    类型徽标与推荐表格每行的数量都走这一份统计，避免两处口径漂移。
     """
     with get_connection() as connection:
         rows = connection.execute(
@@ -57,13 +57,23 @@ def available_next_ship_types() -> list[dict[str, Any]]:
             GROUP BY ship_type
             """
         ).fetchall()
-    counts = {
+    return {
         normalize_ship_type(row["ship_type"]): {
-            "idle_count": row["idle_count"],
-            "train_count": row["train_count"],
+            "idle_count": int(row["idle_count"] or 0),
+            "train_count": int(row["train_count"] or 0),
         }
         for row in rows
     }
+
+
+def available_next_ship_types() -> list[dict[str, Any]]:
+    """可配置的推荐舰种。
+
+    可选范围只取决于舰种常量全集，与数据库当前是否有可练级舰娘无关：
+    舰种可以先行配置，等后续同步或导入出新的可练级舰船后自动参与推荐。
+    当前没有候选时计数为 0，页面照常展示 0 / 0。
+    """
+    counts = _pending_ship_type_counts()
     # 以常量全集为准；别名归一后去重，避免风帆M/S/V 生成重复选项。
     ship_types = list(
         dict.fromkeys(
@@ -257,11 +267,18 @@ def next_ships_by_type(
     # 分组推荐允许传入暂无可练级舰娘的舰种：这类行会在下面被过滤掉。
     manual_targets = manual_targets or {}
     target_limits = target_limits or {}
+    pending_counts = _pending_ship_type_counts()
     rows: list[dict[str, Any]] = []
     for ship_type in ship_types:
         type_targets = manual_targets.get(ship_type, {})
         type_limits = target_limits.get(ship_type, {})
-        row: dict[str, Any] = {"ship_type": ship_type}
+        type_counts = pending_counts.get(ship_type, {})
+        row: dict[str, Any] = {
+            "ship_type": ship_type,
+            # 该舰种当前待挂机、待练级的舰船数量，与舰种徽标口径一致。
+            "idle_count": type_counts.get("idle_count", 0),
+            "train_count": type_counts.get("train_count", 0),
+        }
         for field, mode_name in (
             ("is_idling", "idle"),
             ("is_trained", "train"),

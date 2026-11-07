@@ -449,13 +449,18 @@ def next_armaments_by_group(
         raise ValueError("mode 必须是 both、built 或 enhanced")
     manual_targets = manual_targets or {}
     target_limits = target_limits or {}
+    # 每个类型当前待打造、待强化的兵装数量，数据源与推荐页分组徽标一致。
+    group_counts = armament_group_counts()
     rows: list[dict[str, Any]] = []
     for group in ARMAMENT_RECOMMEND_GROUP_ORDER:
         group_targets = manual_targets.get(group, {})
         group_limits = target_limits.get(group, {})
+        counts = group_counts.get(group, {})
         row: dict[str, Any] = {
             "group": group,
             "group_label": ARMAMENT_GROUP_LABELS[group],
+            "built_count": counts.get("built_count", 0),
+            "enhanced_count": counts.get("enhanced_count", 0),
         }
         for field, mode_name in (
             ("is_built", "built"),

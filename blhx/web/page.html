@@ -91,6 +91,8 @@
     .chip:disabled { color:#5b6b85; cursor:not-allowed; opacity:.55; }
     .chip-count { color:var(--muted); font-size:12px; }
     .chip.selected .chip-count { color:rgba(255,255,255,.76); }
+    /* 推荐表格类型列里的待办数量，与舰种名换行展示，避免挤压列宽。 */
+    .next-table .chip-count { display:block; margin-top:4px; }
     .ship-name { font-size:21px; font-weight:700; }
     .ship-meta { color:var(--muted); margin-top:6px; }
     table { width:100%; border-collapse:collapse; margin-top:16px; }
@@ -715,6 +717,13 @@
         <div class="next-target-list">${list}</div>`;
     }
 
+    function rowPendingBadges(row) {
+      // 数量取当前库内待办总数，统计口径与上方舰种徽标一致。
+      const idle = Number.isFinite(row.idle_count) ? row.idle_count : 0;
+      const train = Number.isFinite(row.train_count) ? row.train_count : 0;
+      return `<span class="chip-count">待挂机${idle} / 待练级${train}</span>`;
+    }
+
     function renderNextTargets() {
       const target = document.getElementById('nextTargets');
       if (!nextTypeConfig.length) {
@@ -735,7 +744,7 @@
           <tbody>
             ${visibleRows.map(row => `
               <tr>
-                <td data-label="舰种">${escapeHtml(row.ship_type)}</td>
+                <td data-label="舰种">${escapeHtml(row.ship_type)}${rowPendingBadges(row)}</td>
                 <td data-label="挂机目标">${recommendationCell(row, 'idle', 'is_idling')}</td>
                 <td data-label="练级目标">${recommendationCell(row, 'train', 'is_trained')}</td>
               </tr>
@@ -885,6 +894,13 @@
         <div class="next-target-list">${list}</div>`;
     }
 
+    function armamentPendingBadges(row) {
+      // 数量取当前库内待办总数，统计口径与兵装推荐分组一致。
+      const built = Number.isFinite(row.built_count) ? row.built_count : 0;
+      const enhanced = Number.isFinite(row.enhanced_count) ? row.enhanced_count : 0;
+      return `<span class="chip-count">待打造${built} / 待强化${enhanced}</span>`;
+    }
+
     function renderArmamentNextTargets() {
       const target = document.getElementById('armamentNextTargets');
       if (!armamentNextRows.length) {
@@ -897,7 +913,7 @@
           <tbody>
             ${armamentNextRows.map(row => `
               <tr>
-                <td data-label="分类">${escapeHtml(row.group_label)}</td>
+                <td data-label="分类">${escapeHtml(row.group_label)}${armamentPendingBadges(row)}</td>
                 <td data-label="打造目标">${armamentRecommendationCell(row, 'built', 'is_built')}</td>
                 <td data-label="强化目标">${armamentRecommendationCell(row, 'enhanced', 'is_enhanced')}</td>
               </tr>

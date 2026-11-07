@@ -2276,6 +2276,63 @@ class AppTests(unittest.TestCase):
             for row in rows:
                 self.assertTrue(row["train_items"])
 
+    def test_recommend_rows_expose_pending_counts(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                idle_ship = app.insert_ship(
+                    connection,
+                    "武藏",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "耐久", "points": 0}
+                        ],
+                    },
+                )
+                fresh_ship = app.insert_ship(
+                    connection,
+                    "长门",
+                    "2023-08-17",
+                    {
+                        "ship_type": "战列",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "耐久", "points": 0}
+                        ],
+                    },
+                )
+                done_ship = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2023-08-17",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "机动", "points": 0}
+                        ],
+                    },
+                )
+            # 武藏只挂机（待练级），长门未记录（待挂机），古鹰两项都完成不计入。
+            app.update_ship_status(idle_ship["id"], "is_idling", True)
+            app.update_ship_status(done_ship["id"], "is_idling", True)
+            app.update_ship_status(done_ship["id"], "is_trained", True)
+
+            rows = {row["ship_type"]: row for row in app.next_ships_by_type("both", ["战列"])}
+            self.assertEqual(rows["战列"]["idle_count"], 1)
+            self.assertEqual(rows["战列"]["train_count"], 1)
+
+            # 计数口径与推荐徽标一致，避免两处统计漂移。
+            option = next(
+                item
+                for item in app.available_next_ship_types()
+                if item["ship_type"] == "战列"
+            )
+            self.assertEqual(rows["战列"]["idle_count"], option["idle_count"])
+            self.assertEqual(rows["战列"]["train_count"], option["train_count"])
+
     def test_init_db_migration_is_atomic(self):
         from unittest.mock import patch
 
@@ -2897,6 +2954,59 @@ class ArmamentTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 app.toggle_armament_manual_target("normal", "is_built", 999999)
 
+    def test_armament_rows_expose_pending_counts(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                normal_done, _ = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+                _, normal_pending = _insert_ship_with_armament(
+                    connection,
+                    "标枪",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-10", "is_collab": False},
+                )
+                _, collab_pending = _insert_ship_with_armament(
+                    connection,
+                    "环",
+                    "重巡",
+                    "超稀有",
+                    {
+                        "release_date": "",
+                        "is_collab": True,
+                        "collab_group": "DOA联动复刻",
+                        "collab_order": 1,
+                    },
+                )
+            # 拉菲两项都完成；标枪只打造（待强化）；环两项都未记录（待打造且待强化）。
+            app.update_armament_status(normal_pending, "is_built", True)
+            built = next(
+                item["id"]
+                for item in app.list_armaments({"name": "拉菲"})
+            )
+            app.update_armament_status(built, "is_enhanced", True)
+
+            rows = {row["group"]: row for row in app.next_armaments_by_group("both")}
+            self.assertEqual(rows["normal"]["built_count"], 0)
+            self.assertEqual(rows["normal"]["enhanced_count"], 1)
+            self.assertEqual(rows["collab"]["built_count"], 1)
+            self.assertEqual(rows["collab"]["enhanced_count"], 1)
+
+            # 与推荐页分组徽标同源。
+            self.assertEqual(
+                rows["collab"]["built_count"],
+                app.armament_group_counts()["collab"]["built_count"],
+            )
+            self.assertEqual(
+                rows["collab"]["enhanced_count"],
+                app.armament_group_counts()["collab"]["enhanced_count"],
+            )
+
     def test_armament_config_survives_ship_config_writes(self):
         with isolated_app_data():
             with app.get_connection() as connection:
@@ -2956,7 +3066,9 @@ class ArmamentTests(unittest.TestCase):
         self.assertLess(clear, delete)
         for label in ("是否联动", "已打造", "已强化", "打造目标", "强化目标"):
             self.assertIn(f'data-label="{label}"', html)
-        # 推荐顺序（常规在前）与筛选项顺序（是/否）互不影响。
+        # 推荐表格的类型列展示当前待办数量。
+        self.assertIn("待挂机${idle} / 待练级${train}", html)
+        self.assertIn("待打造${built} / 待强化${enhanced}", html)        # 推荐顺序（常规在前）与筛选项顺序（是/否）互不影响。
         self.assertEqual(app.ARMAMENT_RECOMMEND_GROUP_ORDER, ["normal", "collab"])
         self.assertEqual(app.ARMAMENT_GROUP_ORDER, ["collab", "normal"])
 
