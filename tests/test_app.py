@@ -597,12 +597,16 @@ class AppTests(unittest.TestCase):
             app.update_ship_status(ship_1["id"], "is_idling", True)
 
             counts = app.count_pending_ship_statuses({"needs_training": "是"})
-            self.assertEqual(counts, {"is_idling": 2, "is_trained": 3})
+            self.assertEqual(
+                counts, {"is_idling": 2, "is_trained": 3, "pending": 3}
+            )
             # 统计时忽略本字段自身的筛选，但仍受其他筛选影响。
             counts = app.count_pending_ship_statuses(
                 {"needs_training": "是", "is_idling": "是"}
             )
-            self.assertEqual(counts, {"is_idling": 2, "is_trained": 1})
+            self.assertEqual(
+                counts, {"is_idling": 2, "is_trained": 1, "pending": 1}
+            )
             self.assertRegex(app.APP_VERSION, r"^\d+\.\d+\.\d+$")
             self.assertEqual(
                 app.APP_VERSION,
@@ -1306,6 +1310,57 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app.list_operations()[0]["message"], "清除记录：武藏")
             self.assertIsNone(app.clear_ship_statuses(99999))
 
+    def test_pending_filter_matches_idle_or_trained_unfinished(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ships = {}
+                for name, ship_type, attribute in (
+                    ("武藏", "战列", "耐久"),
+                    ("古鹰", "重巡", "机动"),
+                    ("夕立", "驱逐", "炮击"),
+                ):
+                    ships[name] = app.insert_ship(
+                        connection,
+                        name,
+                        "2017-05-25",
+                        {
+                            "ship_type": ship_type,
+                            "rarity": "精锐",
+                            "tech_points": [
+                                {"stage": "解锁图鉴", "attribute": attribute, "points": 0}
+                            ],
+                        },
+                    )
+            # 武藏只挂机未练级，古鹰挂机+练级都完成，夕立两项都未记录。
+            app.update_ship_status(ships["武藏"]["id"], "is_idling", True)
+            app.update_ship_status(ships["古鹰"]["id"], "is_idling", True)
+            app.update_ship_status(ships["古鹰"]["id"], "is_trained", True)
+
+            pending_names = sorted(
+                ship["name"] for ship in app.list_ships({"pending": "是"})
+            )
+            self.assertEqual(pending_names, sorted(["武藏", "夕立"]))
+            # 两项都未记录的舰船同样命中“未完成”。
+            self.assertEqual(
+                [
+                    ship["name"]
+                    for ship in app.list_ships({"pending": "是", "ship_type": "驱逐"})
+                ],
+                ["夕立"],
+            )
+            # 只支持“是”；其他取值视为不筛选。
+            self.assertEqual(len(app.list_ships({"pending": "否"})), 3)
+            # 关闭筛选时不受影响。            self.assertEqual(len(app.list_ships({"pending": ""})), 3)
+
+            # 与已有状态筛选按 AND 组合：只挂机未练级的舰船。
+            self.assertEqual(
+                [
+                    ship["name"]
+                    for ship in app.list_ships({"pending": "是", "is_trained": "是"})
+                ],
+                [],
+            )
+
     def test_manual_targets_persist_and_drive_recommendation(self):
         with isolated_app_data():
             with app.get_connection() as connection:
@@ -1633,8 +1688,12 @@ class AppTests(unittest.TestCase):
         handler.path = "/api/ships?ship_type=%E6%88%98%E5%88%97"
         self.assertEqual(handler.query_filters()["ship_types"], ["战列"])
 
+        handler.path = "/api/ships?pending=%E6%98%AF"
+        self.assertEqual(handler.query_filters()["pending"], "是")
+
         handler.path = "/api/ships"
         self.assertNotIn("ship_types", handler.query_filters())
+        self.assertEqual(handler.query_filters()["pending"], "")
 
     def test_training_completion_releases_idle_slot(self):
         with isolated_app_data():
@@ -1814,6 +1873,18 @@ class AppTests(unittest.TestCase):
         self.assertIn("pendingLabel: '未挂机'", html)
         self.assertIn("pendingLabel: '未练级'", html)
         self.assertIn("result.status_counts", html)
+        # “未完成”筛选排在“已练级”之后，与后端 pending 参数对应。
+        self.assertIn(
+            "{ key: 'pending', label: '完成状态', options: ['', '是'], optionLabels: { '': '全部', '是': '未完成' } }",
+            html,
+        )
+        # 默认选中“未完成”，重置筛选后保持一致。
+        self.assertIn("pending: '是'", html)
+        self.assertIn("filterState.pending = '是';", html)
+        self.assertLess(
+            html.index("{ key: 'is_trained', label: '已练级'"),
+            html.index("{ key: 'pending', label: '完成状态'"),
+        )
         # 未挂机/未练级数量排在筛选项按钮之后，与筛选按钮同一行展示。
         options_loop = html.index("${group.options.map(option => `")
         pending_count = html.index("${group.pendingLabel && statusCounts[group.key] !== null")

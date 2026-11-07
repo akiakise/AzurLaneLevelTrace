@@ -18,6 +18,12 @@ from ..core.state import SYNC_STATE
 from .tech import parse_tech_attribute
 from ..core.utils import utc_now_text
 
+# “未完成”把挂机与练级视为一组：任意一项不是已完成（未记录或未完成）即命中。
+# 必须用 COALESCE 兜住 NULL，否则 NOT (NULL = 1) 仍为 NULL，未记录的行会被漏掉。
+PENDING_CONDITION = (
+    "NOT (COALESCE(s.is_idling, 0) = 1 AND COALESCE(s.is_trained, 0) = 1)"
+)
+
 
 def ship_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
@@ -255,6 +261,9 @@ def _build_ship_conditions(
             conditions.append("s.is_trained = 1")
         else:
             conditions.append("COALESCE(s.is_trained, 0) = 0")
+    if "pending" not in skip_fields and filters.get("pending") == "是":
+        # 未完成 = 未挂机或未练级，两者只要有一项未记录就命中。
+        conditions.append(PENDING_CONDITION)
     if bonus_ship_type_filter or bonus_attribute_filter:
         tech_conditions = [
             "tp.ship_id = s.id",
@@ -279,13 +288,18 @@ def _build_ship_conditions(
 
 
 def count_pending_ship_statuses(filters: dict[str, Any]) -> dict[str, int]:
-    """统计当前其他筛选条件下未挂机与未练级的舰船数量。"""
+    """统计当前其他筛选条件下未挂机、未练级与未完成的舰船数量。"""
     counts: dict[str, int] = {}
-    for field in ("is_idling", "is_trained"):
+    count_fields = [
+        ("is_idling", "COALESCE(s.is_idling, 0) = 0"),
+        ("is_trained", "COALESCE(s.is_trained, 0) = 0"),
+        ("pending", PENDING_CONDITION),
+    ]
+    for field, condition in count_fields:
         conditions, parameters = _build_ship_conditions(
             filters, frozenset({field})
         )
-        conditions.append(f"COALESCE(s.{field}, 0) = 0")
+        conditions.append(condition)
         with get_connection() as connection:
             row = connection.execute(
                 f"SELECT COUNT(*) FROM ships s WHERE {' AND '.join(conditions)}",

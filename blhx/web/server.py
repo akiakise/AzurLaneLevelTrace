@@ -106,6 +106,7 @@ class TrackerHandler(BaseHTTPRequestHandler):
             "needs_training",
             "is_idling",
             "is_trained",
+            "pending",
         ]
         filters: dict[str, Any] = {
             key: query.get(key, [""])[0].strip() for key in keys

@@ -326,7 +326,7 @@
       recommendShipTypes: []
     };
     let nextOptions = [];
-    let statusCounts = { is_idling: null, is_trained: null };
+    let statusCounts = { is_idling: null, is_trained: null, pending: null };
     let nextTypeConfig = [];
     let nextTargets = [];
     let manualTargets = {};
@@ -345,7 +345,8 @@
       bonus_attribute: '',
       needs_training: '是',
       is_idling: '',
-      is_trained: ''
+      is_trained: '',
+      pending: '是'
     };
     const escapeHtml = value => {
       const div = document.createElement('div');
@@ -453,6 +454,7 @@
         statusCounts = {
           is_idling: null,
           is_trained: null,
+          pending: null,
           ...(result.status_counts || {})
         };
         renderShips();
@@ -623,7 +625,8 @@
         { key: 'bonus_attribute', label: '加成属性', options: ['', ...filterOptions.bonusAttributes] },
         { key: 'needs_training', label: '需要练级', options: ['', '是', '否'] },
         { key: 'is_idling', label: '已挂机', options: ['', '是', '否'], pendingLabel: '未挂机' },
-        { key: 'is_trained', label: '已练级', options: ['', '是', '否'], pendingLabel: '未练级' }
+        { key: 'is_trained', label: '已练级', options: ['', '是', '否'], pendingLabel: '未练级' },
+        { key: 'pending', label: '完成状态', options: ['', '是'], optionLabels: { '': '全部', '是': '未完成' } }
       ];
       document.getElementById('filterGroups').innerHTML = groups.map(group => `
         <div class="chip-group">
@@ -633,7 +636,7 @@
               class="chip ${filterState[group.key] === option ? 'selected' : ''}"
               data-group="${escapeAttr(group.key)}"
               data-value="${escapeAttr(option)}"
-            >${escapeHtml(option || '全部')}</button>
+            >${escapeHtml((group.optionLabels || {})[option] ?? (option || '全部'))}</button>
           `).join('')}
           ${group.pendingLabel && statusCounts[group.key] !== null
             ? `<span class="chip-count">${escapeHtml(group.pendingLabel)} ${statusCounts[group.key]}</span>`
@@ -1265,6 +1268,7 @@
       filterState.needs_training = '是';
       filterState.is_idling = '';
       filterState.is_trained = '';
+      filterState.pending = '是';
       document.getElementById('fName').value = '';
       renderFilters();
       await loadShips();
