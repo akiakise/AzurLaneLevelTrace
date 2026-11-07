@@ -8,11 +8,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from ..storage.config import (
     read_config,
+    save_armament_target_limit,
     save_next_ship_types,
     save_target_limit,
+    toggle_armament_manual_target,
     toggle_manual_target,
 )
 from ..core.constants import (
+    ARMAMENT_GROUP_LABELS,
+    ARMAMENT_GROUP_ORDER,
     BONUS_ATTRIBUTE_ORDER,
     BONUS_SHIP_TYPE_ORDER,
     LOGGER,
@@ -33,6 +37,14 @@ from ..transfer.csv_io import (
 from ..storage.history import list_operations
 from .page import PAGE_HTML, STATIC_DIR
 from ..domain.recommendations import available_next_ship_types, next_ship, next_ships_by_type
+from ..domain.armaments import (
+    clear_armament_statuses,
+    count_pending_armament_statuses,
+    delete_armament,
+    list_armaments,
+    next_armaments_by_group,
+    update_armament_status,
+)
 from ..domain.ships import (
     clear_ship_statuses,
     clear_ships,
@@ -123,6 +135,14 @@ class TrackerHandler(BaseHTTPRequestHandler):
             filters["ship_types"] = ship_types
         return filters
 
+    def query_armament_filters(self) -> dict[str, Any]:
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        keys = ["name", "ship_type", "rarity", "group", "is_collab",
+                "is_built", "is_enhanced", "pending"]
+        return {
+            key: query.get(key, [""])[0].strip() for key in keys
+        }
+
     def next_query_ship_types(self) -> list[str]:
         query = parse_qs(urlsplit(self.path).query)
         ship_type = query.get("ship_type", [""])[0]
@@ -156,6 +176,27 @@ class TrackerHandler(BaseHTTPRequestHandler):
                         "status_counts": count_pending_ship_statuses(filters),
                     }
                 )
+            elif path == "/api/armaments":
+                filters = self.query_armament_filters()
+                self.send_json(
+                    {
+                        "armaments": list_armaments(filters),
+                        "status_counts": count_pending_armament_statuses(filters),
+                    }
+                )
+            elif path == "/api/armament-next-group":
+                query = parse_qs(urlsplit(self.path).query)
+                mode = query.get("mode", ["both"])[0]
+                config = read_config()
+                self.send_json(
+                    {
+                        "rows": next_armaments_by_group(
+                            mode,
+                            config["armament_manual_targets"],
+                            config["armament_target_limits"],
+                        )
+                    }
+                )
             elif path == "/api/filter-options":
                 self.send_json(
                     {
@@ -164,6 +205,10 @@ class TrackerHandler(BaseHTTPRequestHandler):
                         "bonus_ship_types": BONUS_SHIP_TYPE_ORDER,
                         "bonus_attributes": BONUS_ATTRIBUTE_ORDER,
                         "recommend_ship_types": RECOMMEND_SHIP_TYPE_ORDER,
+                        "armament_groups": [
+                            {"value": value, "label": ARMAMENT_GROUP_LABELS[value]}
+                            for value in ARMAMENT_GROUP_ORDER
+                        ],
                         "version": APP_VERSION,
                     }
                 )
@@ -214,6 +259,7 @@ class TrackerHandler(BaseHTTPRequestHandler):
                         "total": SYNC_STATE["total"],
                         "processed": SYNC_STATE["processed"],
                         "skipped": SYNC_STATE["skipped"],
+                        "armaments": SYNC_STATE.get("armaments", 0),
                         "errors": list(SYNC_STATE["errors"]),
                     }
                 )
@@ -287,6 +333,49 @@ class TrackerHandler(BaseHTTPRequestHandler):
                     payload.get("ship_id"),
                 )
                 self.send_json(config)
+            elif path == "/api/armament/status":
+                payload = self.read_json()
+                updated = update_armament_status(
+                    int(payload.get("id", 0)),
+                    str(payload.get("field", "")),
+                    payload.get("value", False),
+                )
+                if updated is None:
+                    self.send_error_json("兵装不存在", 404)
+                    return
+                self.send_json({"armament": updated})
+            elif path == "/api/armament/clear-status":
+                payload = self.read_json()
+                cleared = clear_armament_statuses(int(payload.get("id", 0)))
+                if cleared is None:
+                    self.send_error_json("兵装不存在", 404)
+                    return
+                self.send_json({"armament": cleared})
+            elif path == "/api/armament/delete":
+                payload = self.read_json()
+                deleted = delete_armament(int(payload.get("id", 0)))
+                if deleted is None:
+                    self.send_error_json("兵装不存在", 404)
+                    return
+                self.send_json({"deleted": True, "armament": deleted})
+            elif path == "/api/armament-target-limit":
+                payload = self.read_json()
+                self.send_json(
+                    save_armament_target_limit(
+                        str(payload.get("group", "")),
+                        str(payload.get("field", "")),
+                        payload.get("limit"),
+                    )
+                )
+            elif path == "/api/armament-manual-target":
+                payload = self.read_json()
+                self.send_json(
+                    toggle_armament_manual_target(
+                        str(payload.get("group", "")),
+                        str(payload.get("field", "")),
+                        payload.get("armament_id"),
+                    )
+                )
             elif path == "/api/ship/clear-status":
                 payload = self.read_json()
                 cleared = clear_ship_statuses(int(payload.get("id", 0)))

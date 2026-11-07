@@ -158,6 +158,8 @@ def delete_ship(ship_id: int) -> bool:
         ).fetchone()
         if ship is None:
             return False
+        # 兵装随舰船一起删除；外键级联之外再显式删除一层，兼容旧库。
+        connection.execute("DELETE FROM armaments WHERE ship_id = ?", (ship_id,))
         cursor = connection.execute(
             "DELETE FROM ships WHERE id = ?", (ship_id,)
         )
@@ -187,6 +189,8 @@ def clear_ships() -> int:
             count = connection.execute("SELECT COUNT(*) FROM ships").fetchone()[0]
             connection.execute("DELETE FROM ships")
             connection.execute("DELETE FROM tech_points")
+            # 兵装表虽然有 ON DELETE CASCADE，仍显式删除，避免旧库缺外键约束时残留。
+            connection.execute("DELETE FROM armaments")
             connection.execute("DELETE FROM operation_logs")
             has_sequence_table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
@@ -201,6 +205,7 @@ def clear_ships() -> int:
                 "total": 0,
                 "processed": 0,
                 "skipped": 0,
+                "armaments": 0,
                 "errors": [],
             }
         )
@@ -494,6 +499,8 @@ def _release_completed_manual_targets(ship_id: int, read_config, write_config) -
                 "next_ship_types": config["next_ship_types"],
                 "target_limits": config["target_limits"],
                 "manual_targets": manual_targets,
+                "armament_target_limits": config["armament_target_limits"],
+                "armament_manual_targets": config["armament_manual_targets"],
             }
         )
 
@@ -535,5 +542,7 @@ def _release_manual_target_locked(
                 "next_ship_types": config["next_ship_types"],
                 "target_limits": config["target_limits"],
                 "manual_targets": manual_targets,
+                "armament_target_limits": config["armament_target_limits"],
+                "armament_manual_targets": config["armament_manual_targets"],
             }
         )

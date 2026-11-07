@@ -286,7 +286,7 @@
       <div id="shipPickerList" class="picker-list"><div class="picker-empty">加载中...</div></div>
       <div class="modal-footer">
         <button type="button" onclick="closeShipPicker()">取消</button>
-        <button type="button" class="danger" onclick="clearShipPickerTarget()">清除已录入</button>
+        <button type="button" class="danger" onclick="clearPickerTarget()">清除已录入</button>
       </div>
     </div>
   </div>
@@ -325,6 +325,12 @@
         <div class="next-title">推荐目标</div>
         <div id="nextTargets"><span class="empty">请选择舰种</span></div>
       </div>
+      <div class="card next-card">
+        <div class="next-head">
+          <div class="next-title">兵装推荐（联动与常规分别推荐，无需选择类型）</div>
+        </div>
+        <div id="armamentNextTargets"><span class="empty">加载中...</span></div>
+      </div>
     </section>
 
     <section class="tab-panel" role="tabpanel" id="panelTraining" aria-labelledby="tabTraining" hidden>
@@ -345,9 +351,16 @@
 
     <section class="tab-panel" role="tabpanel" id="panelEquipment" aria-labelledby="tabEquipment" hidden>
       <div class="card">
-        <div class="placeholder">
-          <div class="placeholder-title">兵装列表</div>
-          <p class="placeholder-text">功能占位，暂未实现。<br>后续将在此展示兵装数据与筛选。</p>
+        <div class="name-search">
+          <input id="armamentName" placeholder="输入舰船名称关键字，自动模糊查询">
+        </div>
+        <div id="armamentFilterGroups" class="filter-groups"></div>
+        <div id="armamentMessage" class="status-line"></div>
+        <div class="table-scroll">
+          <table class="ships-table armaments-table">
+            <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>是否联动</th><th>分类</th><th>实装日期</th><th>已打造</th><th>已强化</th><th>操作</th></tr></thead>
+            <tbody id="armamentTable"><tr><td colspan="9" class="empty">加载中...</td></tr></tbody>
+          </table>
         </div>
       </div>
     </section>
@@ -368,8 +381,15 @@
     let nextTargets = [];
     let manualTargets = {};
     let targetLimits = {};
+    let armamentData = [];
+    let armamentOptions = { groups: [] };
+    let armamentStatusCounts = { is_built: null, is_enhanced: null, pending: null };
+    let armamentNextRows = [];
+    let armamentManualTargets = {};
+    let armamentTargetLimits = {};
     let nameSearchTimer = null;
-    let pickerState = { shipType: '', field: '', keyword: '', timer: null };
+    let armamentNameTimer = null;
+    let pickerState = { kind: 'ship', shipType: '', group: '', field: '', keyword: '', timer: null };
     let pendingTypesSave = null;
     let typesDirty = false;
     // 当前可见的 Tab；页面数据在初始化时一次性加载，切换 Tab 只切换展示。
@@ -392,6 +412,17 @@
       is_trained: '',
       pending: '是'
     };
+    // 兵装只有“是否联动”一个类型维度，因此不提供类型选择，直接分联动/常规两块推荐。
+    const armamentFilterState = {
+      name: '',
+      ship_type: '',
+      rarity: '',
+      group: '',
+      is_built: '',
+      is_enhanced: '',
+      pending: '是'
+    };
+    const armamentPickerState = { group: '', field: '', keyword: '', timer: null };
     const escapeHtml = value => {
       const div = document.createElement('div');
       div.textContent = value;
@@ -713,6 +744,353 @@
         </table>`;
     }
 
+    /* ---------------- 兵装列表 ---------------- */
+
+    function armamentGroupLabel(group) {
+      const option = (armamentOptions.groups || []).find(item => item.value === group);
+      return option ? option.label : (group === 'collab' ? '联动兵装' : '常规兵装');
+    }
+
+    function renderArmaments() {
+      const tbody = document.getElementById('armamentTable');
+      if (!armamentData.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="empty">没有匹配的数据</td></tr>';
+        return;
+      }
+      tbody.innerHTML = armamentData.map(armament => {
+        const actionButtons = [];
+        if (armament.is_built !== true) {
+          actionButtons.push(`<button type="button" data-armament-action="is_built" data-id="${escapeAttr(armament.id)}">打造完成</button>`);
+        }
+        if (armament.is_enhanced !== true) {
+          actionButtons.push(`<button type="button" data-armament-action="is_enhanced" data-id="${escapeAttr(armament.id)}">强化完成</button>`);
+        }
+        if (armament.is_built !== null || armament.is_enhanced !== null) {
+          actionButtons.push(`<button type="button" data-armament-clear data-id="${escapeAttr(armament.id)}" data-name="${escapeAttr(armament.name)}">清除数据</button>`);
+        }
+        actionButtons.push(`<button type="button" class="danger" data-armament-delete data-id="${escapeAttr(armament.id)}" data-name="${escapeAttr(armament.name)}">删除</button>`);
+        return `<tr>
+          <td data-label="舰船名称">${escapeHtml(armament.name)}</td>
+          <td data-label="舰种">${escapeHtml(armament.ship_type || '')}</td>
+          <td data-label="稀有度">${escapeHtml(armament.rarity || '')}</td>
+          <td data-label="是否联动" class="${statusClass(armament.is_collab)}">${armament.is_collab ? '是' : '否'}</td>
+          <td data-label="分类">${escapeHtml(armament.group_label)}${armament.is_collab && armament.collab_group ? ` · ${escapeHtml(armament.collab_group)}` : ''}</td>
+          <td data-label="实装日期">${escapeHtml(armament.is_collab ? '—' : (armament.release_date || ''))}</td>
+          <td data-label="已打造" class="${statusClass(armament.is_built)}">${statusText(armament.is_built)}</td>
+          <td data-label="已强化" class="${statusClass(armament.is_enhanced)}">${statusText(armament.is_enhanced)}</td>
+          <td data-label="操作"><div class="row-actions">${actionButtons.join('')}</div></td>
+        </tr>`;
+      }).join('');
+    }
+
+    function renderArmamentFilters() {
+      const groups = [
+        { key: 'ship_type', label: '舰种', options: ['', ...filterOptions.shipTypes] },
+        { key: 'rarity', label: '稀有度', options: ['', ...filterOptions.rarities] },
+        {
+          key: 'group',
+          label: '是否联动',
+          options: ['', ...(armamentOptions.groups || []).map(item => item.value)],
+          optionLabels: { '': '全部', collab: '是（联动）', normal: '否（常规）' }
+        },
+        { key: 'is_built', label: '已打造', options: ['', '是', '否'], pendingLabel: '未打造' },
+        { key: 'is_enhanced', label: '已强化', options: ['', '是', '否'], pendingLabel: '未强化' },
+        { key: 'pending', label: '完成状态', options: ['', '是'], optionLabels: { '': '全部', '是': '未完成' } }
+      ];
+      document.getElementById('armamentFilterGroups').innerHTML = groups.map(group => `
+        <div class="chip-group">
+          <span class="chip-label">${escapeHtml(group.label)}</span>
+          ${group.options.map(option => `
+            <button type="button"
+              class="chip ${armamentFilterState[group.key] === option ? 'selected' : ''}"
+              data-armament-group="${escapeAttr(group.key)}"
+              data-value="${escapeAttr(option)}"
+            >${escapeHtml((group.optionLabels || {})[option] ?? (option || '全部'))}</button>
+          `).join('')}
+          ${group.pendingLabel && armamentStatusCounts[group.key] !== null
+            ? `<span class="chip-count">${escapeHtml(group.pendingLabel)} ${armamentStatusCounts[group.key]}</span>`
+            : ''}
+        </div>
+      `).join('');
+    }
+
+    async function loadArmaments() {
+      const params = new URLSearchParams({ ...armamentFilterState });
+      try {
+        const result = await requestJson('/api/armaments?' + params.toString());
+        armamentData = result.armaments;
+        armamentStatusCounts = {
+          is_built: null,
+          is_enhanced: null,
+          pending: null,
+          ...(result.status_counts || {})
+        };
+        renderArmaments();
+        renderArmamentFilters();
+        const message = document.getElementById('armamentMessage');
+        message.textContent = `共 ${armamentData.length} 条记录`;
+        message.style.color = '#9db0c9';
+      } catch (error) {
+        const message = document.getElementById('armamentMessage');
+        message.textContent = error.message;
+        message.style.color = '#f87171';
+      }
+    }
+
+    function armamentRecommendationItem(row, mode, item, field) {
+      const armament = item.armament;
+      const manualBadge = item.manual
+        ? '<span class="next-ship-manual">手动录入</span>'
+        : '';
+      const dateText = armament.is_collab
+        ? (armament.collab_group || '联动兵装')
+        : (armament.release_date || '');
+      return `
+        <div class="next-target-item">
+          <div class="next-ship-name">${escapeHtml(armament.name)}${manualBadge}</div>
+          <div class="next-ship-meta">${escapeHtml(armament.rarity || '')} · ${escapeHtml(armament.ship_type || '')} · ${escapeHtml(dateText)}</div>
+          <div class="next-ship-actions">
+            ${item.manual ? `<button type="button"
+              data-arma-remove-manual="${escapeAttr(field)}"
+              data-group="${escapeAttr(row.group)}"
+              data-id="${escapeAttr(armament.id)}"
+            >取消录入</button>` : ''}
+            <button type="button"
+              data-arma-next-action="${escapeAttr(field)}"
+              data-id="${escapeAttr(armament.id)}"
+            >${escapeHtml(field === 'is_built' ? '打造完成' : '强化完成')}</button>
+          </div>
+        </div>`;
+    }
+
+    function armamentRecommendationCell(row, mode, field) {
+      const items = row[`${mode}_items`] || [];
+      const limit = row[`${mode}_limit`] || 1;
+      const staleNotice = row[`${mode}_manual_stale`]
+        ? '<span class="next-ship-stale">有录入的兵装不可用，已按自动推荐补齐</span>'
+        : '';
+      const list = items.length
+        ? items.map(item => armamentRecommendationItem(row, mode, item, field)).join('')
+        : '<span class="empty">暂无可推荐兵装</span>';
+      return `
+        <div class="next-target-head">
+          <span class="next-target-count">${items.length} / ${limit}</span>
+          <div class="next-target-controls">
+            <button type="button" class="chip small" data-arma-limit-down="${escapeAttr(field)}" data-group="${escapeAttr(row.group)}" ${limit <= 1 ? 'disabled' : ''}>-</button>
+            <button type="button" class="chip small" data-arma-limit-up="${escapeAttr(field)}" data-group="${escapeAttr(row.group)}" ${limit >= 10 ? 'disabled' : ''}>+</button>
+            <button type="button" class="chip small" data-arma-pick-target="${escapeAttr(field)}" data-group="${escapeAttr(row.group)}" ${row[`${mode}_manual_count`] >= limit ? 'disabled' : ''}>录入</button>
+          </div>
+        </div>
+        ${staleNotice}
+        <div class="next-target-list">${list}</div>`;
+    }
+
+    function renderArmamentNextTargets() {
+      const target = document.getElementById('armamentNextTargets');
+      if (!armamentNextRows.length) {
+        target.innerHTML = '<span class="empty">暂无可推荐兵装，请先全量同步</span>';
+        return;
+      }
+      target.innerHTML = `
+        <table class="next-table">
+          <thead><tr><th>分类</th><th>打造目标</th><th>强化目标</th></tr></thead>
+          <tbody>
+            ${armamentNextRows.map(row => `
+              <tr>
+                <td data-label="分类">${escapeHtml(row.group_label)}</td>
+                <td data-label="打造目标">${armamentRecommendationCell(row, 'built', 'is_built')}</td>
+                <td data-label="强化目标">${armamentRecommendationCell(row, 'enhanced', 'is_enhanced')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    async function loadArmamentNextTargets() {
+      const result = await requestJson('/api/armament-next-group?mode=both');
+      armamentNextRows = result.rows;
+      renderArmamentNextTargets();
+    }
+
+    async function completeArmamentStatus(armamentId, field) {
+      const finishLoading = beginPageLoading(field === 'is_built' ? '正在标记打造完成…' : '正在标记强化完成…');
+      try {
+        await requestJson('/api/armament/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: armamentId, field, value: true })
+        });
+        showToast('兵装状态已更新');
+        await loadArmaments();
+        await loadNextTypeConfig();
+        await loadArmamentNextTargets();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        finishLoading();
+      }
+    }
+
+    async function clearArmamentStatus(armamentId, armamentName) {
+      const finishLoading = beginPageLoading('正在清除兵装状态…');
+      try {
+        await requestJson('/api/armament/clear-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: armamentId })
+        });
+        showToast(`已清除「${armamentName}」的打造与强化状态`);
+        await loadArmaments();
+        await loadNextTypeConfig();
+        await loadArmamentNextTargets();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        finishLoading();
+      }
+    }
+
+    async function deleteArmamentById(armamentId, armamentName) {
+      const finishLoading = beginPageLoading('正在删除兵装…');
+      try {
+        await requestJson('/api/armament/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: armamentId })
+        });
+        showToast(`已删除「${armamentName}」的兵装`);
+        await loadArmaments();
+        await loadNextTypeConfig();
+        await loadArmamentNextTargets();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        finishLoading();
+      }
+    }
+
+    async function changeArmamentTargetLimit(group, field, delta) {
+      const current = ((armamentTargetLimits[group] || {})[field]) || 1;
+      const next = current + delta;
+      if (next < 1 || next > 10) return;
+      const finishLoading = beginPageLoading('正在保存兵装目标数量…');
+      try {
+        const result = await requestJson('/api/armament-target-limit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ group, field, limit: next })
+        });
+        applyArmamentConfig(result);
+        await loadArmamentNextTargets();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        finishLoading();
+      }
+    }
+
+    async function removeArmamentManualTarget(group, field, armamentId) {
+      const finishLoading = beginPageLoading('正在取消兵装录入…');
+      try {
+        const result = await requestJson('/api/armament-manual-target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ group, field, armament_id: armamentId })
+        });
+        applyArmamentConfig(result);
+        showToast('已取消录入');
+        await loadArmamentNextTargets();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        finishLoading();
+      }
+    }
+
+    function openArmamentPicker(group, field) {
+      pickerState = { kind: 'armament', group, field, keyword: '', timer: null };
+      const limit = ((armamentTargetLimits[group] || {})[field]) || 1;
+      document.getElementById('shipPickerTitle').textContent =
+        `选择${armamentGroupLabel(group)}的${field === 'is_built' ? '打造' : '强化'}目标（最多 ${limit} 个）`;
+      document.getElementById('shipPickerSearch').value = '';
+      document.getElementById('shipPickerModal').classList.add('active');
+      loadPickerItems();
+      document.getElementById('shipPickerSearch').focus();
+    }
+
+    async function loadPickerArmaments() {
+      const list = document.getElementById('shipPickerList');
+      const params = new URLSearchParams({ group: pickerState.group, pending: '是' });
+      if (pickerState.keyword) params.append('name', pickerState.keyword);
+      try {
+        const result = await requestJson('/api/armaments?' + params.toString());
+        if (!result.armaments.length) {
+          list.innerHTML = '<div class="picker-empty">没有匹配的兵装</div>';
+          return;
+        }
+        const selectedIds = pickerManualIds();
+        list.innerHTML = result.armaments.map(armament => {
+          const selected = selectedIds.includes(String(armament.id));
+          return `
+          <button type="button" class="picker-item ${selected ? 'selected' : ''}"
+            data-pick-id="${escapeAttr(armament.id)}"
+            data-pick-name="${escapeAttr(armament.name)}"
+          >
+            <span class="picker-item-name">${selected ? '✓ ' : ''}${escapeHtml(armament.name)}</span>
+            <span class="picker-item-meta">${escapeHtml(armament.rarity || '')} · 打造${statusText(armament.is_built) || '未记录'} / 强化${statusText(armament.is_enhanced) || '未记录'}</span>
+          </button>`;
+        }).join('');
+      } catch (error) {
+        list.innerHTML = `<div class="picker-empty">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    async function togglePickerArmament(armamentId, armamentName) {
+      const finishLoading = beginPageLoading('正在保存兵装录入…');
+      try {
+        const result = await requestJson('/api/armament-manual-target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            group: pickerState.group,
+            field: pickerState.field,
+            armament_id: armamentId
+          })
+        });
+        applyArmamentConfig(result);
+        const fieldLabel = pickerState.field === 'is_built' ? '打造' : '强化';
+        const stillSelected = pickerManualIds().includes(String(armamentId));
+        showToast(stillSelected ? `已录入「${armamentName}」为${fieldLabel}目标` : `已取消「${armamentName}」的${fieldLabel}录入`);
+        await loadArmamentNextTargets();
+        await loadPickerItems();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        finishLoading();
+      }
+    }
+
+    async function clearArmamentPickerTarget() {
+      const { group, field } = pickerState;
+      if (!group) return;
+      const finishLoading = beginPageLoading('正在清空兵装录入…');
+      try {
+        const result = await requestJson('/api/armament-manual-target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ group, field, armament_id: null })
+        });
+        applyArmamentConfig(result);
+        showToast('已清空该分组的兵装录入');
+        await loadArmamentNextTargets();
+        await loadPickerItems();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        finishLoading();
+      }
+    }
+
     function renderFilters() {
       const groups = [
         { key: 'ship_type', label: '舰种', options: ['', ...filterOptions.shipTypes] },
@@ -780,7 +1158,7 @@
     }
 
     function openShipPicker(shipType, field) {
-      pickerState = { shipType, field, keyword: '', timer: null };
+      pickerState = { kind: 'ship', shipType, group: '', field, keyword: '', timer: null };
       const limit = ((targetLimits[shipType] || {})[field]) || 1;
       document.getElementById('shipPickerTitle').textContent =
         `选择「${shipType}」${field === 'is_idling' ? '挂机' : '练级'}舰娘（最多 ${limit} 个）`;
@@ -792,7 +1170,7 @@
 
     function closeShipPicker() {
       clearTimeout(pickerState.timer);
-      pickerState = { shipType: '', field: '', keyword: '', timer: null };
+      pickerState = { kind: 'ship', shipType: '', group: '', field: '', keyword: '', timer: null };
       document.getElementById('shipPickerModal').classList.remove('active');
     }
 
@@ -827,8 +1205,21 @@
     }
 
     function pickerManualIds() {
-      const targets = manualTargets[pickerState.shipType] || {};
-      return (targets[pickerState.field] || []).map(String);
+      const source = pickerState.kind === 'armament'
+        ? armamentManualTargets[pickerState.group] || {}
+        : manualTargets[pickerState.shipType] || {};
+      return (source[pickerState.field] || []).map(String);
+    }
+
+    // 舰娘与兵装共用一个选择弹窗，统一按 kind 分发加载与点选。
+    function loadPickerItems() {
+      return pickerState.kind === 'armament' ? loadPickerArmaments() : loadPickerShips();
+    }
+
+    function togglePickerItem(itemId, itemName) {
+      return pickerState.kind === 'armament'
+        ? togglePickerArmament(itemId, itemName)
+        : togglePickerShip(itemId, itemName);
     }
 
     async function togglePickerShip(shipId, shipName) {
@@ -897,6 +1288,12 @@
       }
     }
 
+    function clearPickerTarget() {
+      return pickerState.kind === 'armament'
+        ? clearArmamentPickerTarget()
+        : clearShipPickerTarget();
+    }
+
     async function clearShipPickerTarget() {
       const { shipType, field } = pickerState;
       if (!shipType) return;
@@ -939,6 +1336,7 @@
     }
 
     let pendingDeleteShip = null;
+    let pendingDeleteArmament = null;
 
     function requestDeleteShip(shipId, shipName) {
       pendingDeleteShip = { id: shipId, name: shipName };
@@ -947,12 +1345,26 @@
       document.getElementById('deleteConfirmModal').classList.add('active');
     }
 
+    function requestDeleteArmament(armamentId, armamentName) {
+      pendingDeleteArmament = { id: armamentId, name: armamentName };
+      document.getElementById('deleteConfirmMessage').textContent =
+        `确认删除兵装「${armamentName}」？舰船记录会保留。`;
+      document.getElementById('deleteConfirmModal').classList.add('active');
+    }
+
     function cancelDeleteShip() {
       pendingDeleteShip = null;
+      pendingDeleteArmament = null;
       document.getElementById('deleteConfirmModal').classList.remove('active');
     }
 
     async function confirmDeleteShip() {
+      if (pendingDeleteArmament) {
+        const target = pendingDeleteArmament;
+        cancelDeleteShip();
+        await deleteArmamentById(target.id, target.name);
+        return;
+      }
       if (!pendingDeleteShip) return;
       await deleteShip(pendingDeleteShip.id, pendingDeleteShip.name);
       cancelDeleteShip();
@@ -980,10 +1392,16 @@
         nextTargets = [];
         manualTargets = {};
         targetLimits = {};
+        armamentNextRows = [];
+        armamentManualTargets = {};
+        armamentTargetLimits = {};
+        armamentData = [];
         showMessage(`已清空 ${result.count} 个舰娘`);
         await resetFilters();
+        await resetArmamentFilters();
         renderNextTypes();
         renderNextTargets();
+        renderArmamentNextTargets();
       } catch (error) {
         cancelClearShips();
         showMessage(error.message, true);
@@ -1084,6 +1502,18 @@
       targetLimits = result.target_limits && typeof result.target_limits === 'object'
         ? result.target_limits
         : {};
+      applyArmamentConfig(result);
+    }
+
+    function applyArmamentConfig(result) {
+      armamentManualTargets =
+        result.armament_manual_targets && typeof result.armament_manual_targets === 'object'
+          ? result.armament_manual_targets
+          : {};
+      armamentTargetLimits =
+        result.armament_target_limits && typeof result.armament_target_limits === 'object'
+          ? result.armament_target_limits
+          : {};
     }
 
     async function loadNextTypeConfig() {
@@ -1166,8 +1596,11 @@
         taskFinished = true;
         if (result.status === '完成') {
           await loadShips();
+          await loadArmaments();
           if (version !== progressVersion) return;
           await refreshNextOptions(true);
+          await loadNextTypeConfig();
+          await loadArmamentNextTargets();
         }
         if (version !== progressVersion) return;
         finishProgress();
@@ -1355,6 +1788,19 @@
       setTimeout(() => window.location.reload(), 1200);
     }
 
+    async function resetArmamentFilters() {
+      armamentFilterState.name = '';
+      armamentFilterState.ship_type = '';
+      armamentFilterState.rarity = '';
+      armamentFilterState.group = '';
+      armamentFilterState.is_built = '';
+      armamentFilterState.is_enhanced = '';
+      armamentFilterState.pending = '是';
+      document.getElementById('armamentName').value = '';
+      renderArmamentFilters();
+      await loadArmaments();
+    }
+
     async function resetFilters() {
       filterState.name = '';
       filterState.ship_type = '';
@@ -1378,10 +1824,12 @@
       filterOptions.bonusShipTypes = options.bonus_ship_types;
       filterOptions.bonusAttributes = options.bonus_attributes;
       filterOptions.recommendShipTypes = options.recommend_ship_types || [];
+      armamentOptions.groups = options.armament_groups || [];
       if (options.version) {
         document.getElementById('versionTag').textContent = 'v' + options.version;
       }
       renderFilters();
+      renderArmamentFilters();
       await loadShips();
       await loadNextTypeConfig();
       await refreshNextOptions();
@@ -1390,6 +1838,8 @@
       } else {
         renderNextTargets();
       }
+      await loadArmaments();
+      await loadArmamentNextTargets();
       refreshSyncStatus();
     }
 
@@ -1492,17 +1942,73 @@
     document.getElementById('shipPickerSearch').addEventListener('input', event => {
       pickerState.keyword = event.target.value.trim();
       clearTimeout(pickerState.timer);
-      pickerState.timer = setTimeout(loadPickerShips, 250);
+      pickerState.timer = setTimeout(loadPickerItems, 250);
     });
 
     document.getElementById('shipPickerList').addEventListener('click', event => {
       const item = event.target.closest('button[data-pick-id]');
       if (!item) return;
-      togglePickerShip(Number(item.dataset.pickId), item.dataset.pickName);
+      togglePickerItem(Number(item.dataset.pickId), item.dataset.pickName);
     });
 
     document.getElementById('shipPickerModal').addEventListener('click', event => {
       if (event.target.id === 'shipPickerModal') closeShipPicker();
+    });
+
+    document.getElementById('armamentTable').addEventListener('click', event => {
+      const clearButton = event.target.closest('button[data-armament-clear]');
+      if (clearButton) {
+        clearArmamentStatus(Number(clearButton.dataset.id), clearButton.dataset.name);
+        return;
+      }
+      const deleteButton = event.target.closest('button[data-armament-delete]');
+      if (deleteButton) {
+        requestDeleteArmament(Number(deleteButton.dataset.id), deleteButton.dataset.name);
+        return;
+      }
+      const actionButton = event.target.closest('button[data-armament-action]');
+      if (!actionButton) return;
+      completeArmamentStatus(Number(actionButton.dataset.id), actionButton.dataset.armamentAction);
+    });
+
+    document.getElementById('armamentName').addEventListener('input', event => {
+      armamentFilterState.name = event.target.value.trim();
+      clearTimeout(armamentNameTimer);
+      armamentNameTimer = setTimeout(loadArmaments, 300);
+    });
+
+    document.getElementById('armamentFilterGroups').addEventListener('click', event => {
+      const chip = event.target.closest('button.chip');
+      if (!chip) return;
+      armamentFilterState[chip.dataset.armamentGroup] = chip.dataset.value;
+      renderArmamentFilters();
+      loadArmaments();
+    });
+
+    document.getElementById('armamentNextTargets').addEventListener('click', event => {
+      const downButton = event.target.closest('button[data-arma-limit-down]');
+      if (downButton) {
+        changeArmamentTargetLimit(downButton.dataset.group, downButton.dataset.armaLimitDown, -1);
+        return;
+      }
+      const upButton = event.target.closest('button[data-arma-limit-up]');
+      if (upButton) {
+        changeArmamentTargetLimit(upButton.dataset.group, upButton.dataset.armaLimitUp, 1);
+        return;
+      }
+      const removeButton = event.target.closest('button[data-arma-remove-manual]');
+      if (removeButton) {
+        removeArmamentManualTarget(removeButton.dataset.group, removeButton.dataset.armaRemoveManual, Number(removeButton.dataset.id));
+        return;
+      }
+      const pickButton = event.target.closest('button[data-arma-pick-target]');
+      if (pickButton) {
+        openArmamentPicker(pickButton.dataset.group, pickButton.dataset.armaPickTarget);
+        return;
+      }
+      const actionButton = event.target.closest('button[data-arma-next-action]');
+      if (!actionButton) return;
+      completeArmamentStatus(Number(actionButton.dataset.id), actionButton.dataset.armaNextAction);
     });
 
     document.getElementById('shipTable').addEventListener('click', event => {

@@ -141,6 +141,17 @@ TECH_STAGE_FIELDS = {
     "达到120级": "达到120级属性加成",
 }
 
+# 兵装分组：有具体实装日期的为常规兵装，无日期的为活动赠送的联动兵装。
+ARMAMENT_GROUP_ORDER = ["collab", "normal"]
+# 推荐结果里常规兵装优先展示，与筛选项“是（联动）/ 否（常规）”的顺序刻意分开。
+ARMAMENT_RECOMMEND_GROUP_ORDER = ["normal", "collab"]
+ARMAMENT_GROUP_LABELS = {"collab": "联动兵装", "normal": "常规兵装"}
+# 分组对应的 armaments.is_collab 取值，筛选用。
+ARMAMENT_GROUP_FLAGS = {"collab": 1, "normal": 0}
+# 兵装状态字段与展示名；强化完成会自动联动打造完成，顺序即按钮顺序。
+ARMAMENT_STATUS_FIELDS = {"is_built": "打造", "is_enhanced": "强化"}
+ARMAMENT_MANUAL_FIELDS = ("is_built", "is_enhanced")
+
 SHIP_TYPE_RANK = {value: index for index, value in enumerate(SHIP_TYPE_ORDER)}
 RARITY_FILTER_RANK = {value: index for index, value in enumerate(RARITY_FILTER_ORDER)}
 BONUS_SHIP_TYPE_RANK = {value: index for index, value in enumerate(BONUS_SHIP_TYPE_ORDER)}

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, unquote
+from urllib.parse import quote, unquote, urlencode
 from urllib.request import Request, urlopen
 
 from ..core.constants import (
@@ -147,6 +147,84 @@ def parse_ship_raw(raw_text: str) -> dict[str, Any] | None:
         "rarity": fields.get("稀有度", ""),
         "tech_points": tech_points,
     }
+
+
+# 兵装页面：从「已实装角色一览」到「联动兵装为活动赠送」之间的列表，
+# 每个 <li> 为一批，行首显示具体日期的是常规兵装，显示「XX联动」的是活动赠送的联动兵装。
+ARMAMENT_WIKI_TITLE = "特殊兵装"
+ARMAMENT_SECTION_START = "已实装角色一览"
+ARMAMENT_SECTION_END = "联动兵装为活动赠送"
+ARMAMENT_ROW_PATTERN = re.compile(
+    r'<li>\s*<a href="/blhx/(?P<href>[^"?#]+)"[^>]*>(?P<label>.*?)</a>：(?P<body>.*?)</li>',
+    re.DOTALL,
+)
+# 每艘舰船由同一页面的两个 <a> 组成：第一个带头像图，第二个的 span.AF 是兵装页显示名。
+# title 属性始终是舰船原始名称（例如显示「简·布罗伊」时 title 为「让·巴尔」），
+# 因此不需要再逐舰请求舰娘页面，直接取 title 即可。
+ARMAMENT_SHIP_PATTERN = re.compile(
+    r'<span class="xtb-image">\s*'
+    r'<a href="/blhx/(?P<href>[^"?#]+)" title="(?P<title>[^"]*)">.*?</a>\s*'
+    r'<a href="/blhx/[^"?#]+" title="[^"]*">\s*'
+    r'<span class="nowrap"[^>]*>\s*<span class="AF">(?P<display>[^<]*)</span>',
+    re.DOTALL,
+)
+ARMAMENT_DATE_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+
+
+def _strip_tags(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def slice_armament_section(html_text: str) -> str:
+    start = html_text.find(f">{ARMAMENT_SECTION_START}<")
+    if start < 0:
+        raise ValueError(f"兵装页面未找到「{ARMAMENT_SECTION_START}」")
+    end = html_text.find(ARMAMENT_SECTION_END, start)
+    if end < 0:
+        raise ValueError(f"兵装页面未找到「{ARMAMENT_SECTION_END}」")
+    return html_text[start:end]
+
+
+def parse_armament_entries(html_text: str) -> list[dict[str, Any]]:
+    """解析兵装页面的「已实装角色一览」，按 Wiki 列表顺序返回兵装条目。
+
+    常规兵装带具体实装日期；联动兵装没有日期，用 collab_group 记录所属联动、
+    collab_order 记录在联动段内的先后顺序（1 起）。
+    """
+    entries: list[dict[str, Any]] = []
+    collab_order = 0
+    for row in ARMAMENT_ROW_PATTERN.finditer(slice_armament_section(html_text)):
+        label = _strip_tags(row.group("label"))
+        body = row.group("body")
+        date_match = ARMAMENT_DATE_PATTERN.fullmatch(label)
+        release_date = (
+            f"{date_match.group(1)}-{int(date_match.group(2)):02d}-"
+            f"{int(date_match.group(3)):02d}"
+            if date_match
+            else ""
+        )
+        collab_group = "" if date_match else label
+        for ship in ARMAMENT_SHIP_PATTERN.finditer(body):
+            ship_name = ship.group("title").strip()
+            if not ship_name:
+                continue
+            if collab_group:
+                collab_order += 1
+            entries.append(
+                {
+                    "name": ship_name,
+                    "release_date": release_date,
+                    "is_collab": not date_match,
+                    "collab_group": collab_group,
+                    "collab_order": collab_order if collab_group else 0,
+                }
+            )
+    return entries
+
+
+def fetch_armament_entries() -> list[dict[str, Any]]:
+    html_text = fetch_wiki_text(f"/blhx/{quote(ARMAMENT_WIKI_TITLE)}")
+    return parse_armament_entries(html_text)
 
 
 def parse_wiki_challenge_cookie(body: str) -> str | None:
@@ -354,10 +432,56 @@ def _begin_sync(target_names: list[str] | None = None) -> bool:
                 "total": 0,
                 "processed": 0,
                 "skipped": 0,
+                "armaments": 0,
                 "errors": [],
             }
         )
         return True
+
+
+def _sync_armaments(
+    connection,
+    target_names: list[str] | None = None,
+) -> None:
+    """同步兵装数据；少量同步只更新这几个舰娘的兵装。
+
+    兵装同步失败不应让整次舰船同步报错，因此单独 try 并把错误写进同步错误列表。
+    """
+    from ..domain.armaments import upsert_armament
+
+    SYNC_STATE["message"] = "正在读取兵装页面"
+    try:
+        entries = fetch_armament_entries()
+    except Exception as error:
+        LOGGER.exception("读取兵装页面失败")
+        SYNC_STATE["errors"].append(f"兵装页面: {error}")
+        return
+    if target_names is not None:
+        target_set = set(target_names)
+        entries = [entry for entry in entries if entry["name"] in target_set]
+    ship_rows = connection.execute("SELECT id, name FROM ships").fetchall()
+    ship_ids = {row["name"]: row["id"] for row in ship_rows}
+    matched = 0
+    missing: set[str] = set()
+    for entry in entries:
+        ship_id = ship_ids.get(entry["name"])
+        if ship_id is None:
+            missing.add(entry["name"])
+            continue
+        upsert_armament(connection, ship_id, entry)
+        matched += 1
+    if missing:
+        # 兵装页面比舰船库多出舰船（例如舰船缺少实装日期而未入库）只提示，不当作同步错误，
+        # 否则每次全量同步都会因为这一条让弹窗停在错误状态。
+        LOGGER.warning(
+            "兵装页面中的 %s 艘舰船未匹配到舰船库：%s",
+            len(missing),
+            "、".join(sorted(missing)),
+        )
+    SYNC_STATE["armaments"] = matched
+    SYNC_STATE["message"] = f"已同步 {matched} 条兵装数据"
+    if missing:
+        SYNC_STATE["message"] += f"，{len(missing)} 条未匹配到舰船"
 
 
 def sync_wiki(target_names: list[str] | None = None) -> None:
@@ -429,6 +553,7 @@ def _sync_wiki(target_names: list[str] | None = None) -> None:
                         LOGGER.exception("处理单舰 Wiki 数据失败: %s", ship_name)
                         SYNC_STATE["errors"].append(f"{ship_name}: {error}")
                         SYNC_STATE["message"] = f"处理 {ship_name} 时出错"
+            _sync_armaments(connection, target_names)
         SYNC_STATE["status"] = "完成"
         SYNC_STATE["message"] = (
             f"{'、'.join(target_names)} 同步完成"

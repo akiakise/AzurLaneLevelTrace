@@ -11,6 +11,7 @@ SYNC_STATE: dict[str, Any] = {
     "total": 0,
     "processed": 0,
     "skipped": 0,
+    "armaments": 0,
     "errors": [],
 }
 SYNC_LOCK = threading.Lock()

@@ -6,7 +6,7 @@ from ..core.constants import DATA_DIR, DATABASE_PATH, normalize_ship_type
 from ..core.utils import clean_template_value
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @contextmanager
@@ -101,6 +101,25 @@ def _migrate_tech_points(connection: sqlite3.Connection) -> None:
         connection.commit()
 
 
+def _create_armaments_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS armaments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ship_id INTEGER NOT NULL UNIQUE REFERENCES ships(id) ON DELETE CASCADE,
+            release_date TEXT NOT NULL DEFAULT '',
+            is_collab INTEGER NOT NULL DEFAULT 0,
+            collab_group TEXT NOT NULL DEFAULT '',
+            collab_order INTEGER NOT NULL DEFAULT 0,
+            is_built INTEGER,
+            is_enhanced INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with get_connection() as connection:
@@ -137,6 +156,7 @@ def init_db() -> None:
             """
         )
         _migrate_tech_points(connection)
+        _create_armaments_table(connection)
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_tech_points_ship ON tech_points(ship_id)"
         )
@@ -145,6 +165,10 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_tech_points_bonus
                 ON tech_points(bonus_ship_type, bonus_attribute)
             """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_armaments_group "
+            "ON armaments(is_collab, collab_order, release_date)"
         )
         for row in connection.execute(
             "SELECT id, ship_type, rarity FROM ships"

@@ -7,6 +7,13 @@ import app
 from support import isolated_app_data
 
 
+def _default_armament_limits():
+    return {
+        "collab": {"is_built": 1, "is_enhanced": 1},
+        "normal": {"is_built": 1, "is_enhanced": 1},
+    }
+
+
 class AppTests(unittest.TestCase):
     def test_fetch_wiki_text_retries_rate_limit(self):
         class FakeHeaders:
@@ -821,6 +828,8 @@ class AppTests(unittest.TestCase):
                         "战列": {"is_idling": 1, "is_trained": 1}
                     },
                     "manual_targets": {},
+                    "armament_target_limits": _default_armament_limits(),
+                    "armament_manual_targets": {},
                 },
             )
             with app.config.CONFIG_PATH.open(encoding="utf-8") as file:
@@ -834,6 +843,8 @@ class AppTests(unittest.TestCase):
                             "战列": {"is_idling": 1, "is_trained": 1}
                         },
                         "manual_targets": {},
+                        "armament_target_limits": _default_armament_limits(),
+                        "armament_manual_targets": {},
                     },
                 )
             # 推荐舰种与舰船现状解绑：库里没有驱逐舰也能配置驱逐。
@@ -1306,7 +1317,13 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app.list_ships({}), [])
             self.assertEqual(
                 app.read_config(),
-                {"next_ship_types": [], "target_limits": {}, "manual_targets": {}},
+                {
+                    "next_ship_types": [],
+                    "target_limits": {},
+                    "manual_targets": {},
+                    "armament_target_limits": _default_armament_limits(),
+                    "armament_manual_targets": {},
+                },
             )
 
     def test_clear_ships_rejects_when_sync_running(self):
@@ -1352,6 +1369,8 @@ class AppTests(unittest.TestCase):
                         "战列": {"is_idling": 1, "is_trained": 1}
                     },
                     "manual_targets": {},
+                    "armament_target_limits": _default_armament_limits(),
+                    "armament_manual_targets": {},
                 },
             )
 
@@ -1907,7 +1926,16 @@ class AppTests(unittest.TestCase):
             if app.list_ships({}):
                 self.assertEqual(config["target_limits"]["重巡"]["is_trained"], 3)
             else:
-                self.assertEqual(config, {"next_ship_types": [], "target_limits": {}, "manual_targets": {}})
+                self.assertEqual(
+            config,
+            {
+                "next_ship_types": [],
+                "target_limits": {},
+                "manual_targets": {},
+                "armament_target_limits": _default_armament_limits(),
+                "armament_manual_targets": {},
+            },
+        )
 
     def test_page_script_conflict_and_safety_guards(self):
         html = app.PAGE_HTML
@@ -1944,13 +1972,15 @@ class AppTests(unittest.TestCase):
         # 默认选中“未完成”，重置筛选后保持一致。
         self.assertIn("pending: '是'", html)
         self.assertIn("filterState.pending = '是';", html)
+        # 兵装筛选也有一套同样的完成状态筛选，这里只校验舰船筛选块内的顺序。
+        ship_filter_block = html[html.index("function renderFilters() {"):html.index("async function completeShipStatus")]
         self.assertLess(
-            html.index("{ key: 'is_trained', label: '已练级'"),
-            html.index("{ key: 'pending', label: '完成状态'"),
+            ship_filter_block.index("{ key: 'is_trained', label: '已练级'"),
+            ship_filter_block.index("{ key: 'pending', label: '完成状态'"),
         )
         # 未挂机/未练级数量排在筛选项按钮之后，与筛选按钮同一行展示。
-        options_loop = html.index("${group.options.map(option => `")
-        pending_count = html.index("${group.pendingLabel && statusCounts[group.key] !== null")
+        options_loop = ship_filter_block.index("${group.options.map(option => `")
+        pending_count = ship_filter_block.index("${group.pendingLabel && statusCounts[group.key] !== null")
         self.assertLess(options_loop, pending_count)
         # 导入复用同步进度弹窗，完成后下载结果并整页刷新
         self.assertIn("function showImportOverlay()", html)
@@ -2013,11 +2043,16 @@ class AppTests(unittest.TestCase):
         self.assertIn('id="shipTable"', training_panel)
         self.assertIn('id="filterGroups"', training_panel)
         self.assertNotIn('id="nextTargets"', training_panel)
-        # 兵装列表仅占位，不承载任何数据请求或表格。
+        # 兵装列表独立成表，与舰船表格、推荐目标互不混用。
         equipment_panel = html[html.index('id="panelEquipment"'):html.index('<script>')]
-        self.assertIn('功能占位，暂未实现', equipment_panel)
+        self.assertIn('id="armamentTable"', equipment_panel)
+        self.assertIn('id="armamentFilterGroups"', equipment_panel)
+        self.assertIn('是否联动', equipment_panel)
         self.assertNotIn('id="shipTable"', equipment_panel)
         self.assertNotIn('id="nextTargets"', equipment_panel)
+        # 兵装推荐挂在推荐页，与舰船推荐并列。
+        self.assertIn('id="armamentNextTargets"', recommend_panel)
+        self.assertNotIn('id="armamentNextTargets"', training_panel)
         # 切换逻辑：选中态同步、hash 记忆、键盘导航。
         self.assertIn("function switchTab(name, focusTab = false) {", html)
         self.assertIn("button.setAttribute('aria-selected', String(selected));", html)
@@ -2370,7 +2405,13 @@ class AppTests(unittest.TestCase):
             self.assertFalse(app.config.CONFIG_PATH.exists())
             self.assertEqual(
                 app.read_config(),
-                {"next_ship_types": [], "target_limits": {}, "manual_targets": {}},
+                {
+                    "next_ship_types": [],
+                    "target_limits": {},
+                    "manual_targets": {},
+                    "armament_target_limits": _default_armament_limits(),
+                    "armament_manual_targets": {},
+                },
             )
             with app.get_connection() as connection:
                 for table in ("ships", "tech_points", "operation_logs"):
@@ -2383,6 +2424,420 @@ class AppTests(unittest.TestCase):
                     0,
                 )
             self.assertEqual(app.SYNC_STATE["status"], "未开始")
+
+# 兵装页面原型 HTML：与真实页面同构，含常规日期行、假名、联动行与结尾说明。
+ARMAMENT_PAGE_HTML = """
+<div class="panel-body"><span class="panel-title pull-left">\
+<a id="已实装角色一览"></a>已实装角色一览</span>
+<ul>
+<li><a href="/blhx/2022%E5%B9%B46%E6%9C%889%E6%97%A59:00%E6%B8%AF%E5%8C%BA%E6%94%B9%E5%BB%BA" title="2022年6月9日9:00港区改建">2022年6月9日</a>：\
+<span class="xtb-image"><a href="/blhx/%E6%AC%A7%E6%A0%B9%E4%BA%B2%E7%8E%8B" title="欧根亲王">\
+<img alt="欧根亲王头像.jpg" src="https://example.test/a.jpg" /></a>\
+<a href="/blhx/%E6%AC%A7%E6%A0%B9%E4%BA%B2%E7%8E%8B" title="欧根亲王">\
+<span class="nowrap" style="color:#c90" title="欧根亲王"><span class="AF">萨沃伊亲王</span></span></a></span>、\
+<span class="xtb-image"><a href="/blhx/%E6%8B%89%E8%8F%B2" title="拉菲">\
+<img alt="拉菲头像.jpg" src="https://example.test/b.jpg" /></a>\
+<a href="/blhx/%E6%8B%89%E8%8F%B2" title="拉菲">\
+<span class="nowrap" style="color:#8000ff" title="拉菲"><span class="AF">拉菲</span></span></a></span></li>
+<li><a href="/blhx/2022%E5%B9%B47%E6%9C%8814%E6%97%A59:00%E6%B8%AF%E5%8C%BA%E6%94%B9%E5%BB%BA" title="2022年7月14日9:00港区改建">2022年7月14日</a>：\
+<span class="xtb-image"><a href="/blhx/%E8%AE%A9%C2%B7%E5%B7%B4%E5%B0%94" title="让·巴尔">\
+<img alt="让·巴尔头像.jpg" src="https://example.test/c.jpg" /></a>\
+<a href="/blhx/%E8%AE%A9%C2%B7%E5%B7%B4%E5%B0%94" title="让·巴尔">\
+<span class="nowrap" style="color:#c90" title="让·巴尔"><span class="AF">简·布罗伊</span></span></a></span></li>
+<li><a href="/blhx/2023%E5%B9%B44%E6%9C%881%E6%97%A513:00%E6%B8%AF%E5%8C%BA%E6%94%B9%E5%BB%BA" title="2023年3月31日13:00港区改建">2023年4月1日</a>：\
+<span class="xtb-image"><a href="/blhx/%E7%89%B9%E8%A3%85%E5%9E%8B%E5%B8%83%E9%87%8CMKIII" title="特装型布里MKIII">\
+<img alt="布里头像.jpg" src="https://example.test/d.jpg" /></a>\
+<a href="/blhx/%E7%89%B9%E8%A3%85%E5%9E%8B%E5%B8%83%E9%87%8CMKIII" title="特装型布里MKIII">\
+<span class="nowrap" style="color:#c90" title="特装型布里MKIII"><span class="AF">特装型布里MKIII</span></span></a></span>\
+（特别活动赠送，无需强化与属性改装）</li>
+<li><a href="/blhx/2023%E5%B9%B44%E6%9C%8827%E6%97%A510:00%E6%B8%AF%E5%8C%BA%E6%94%B9%E5%BB%BA" title="2023年4月27日10:00港区改建">DOA联动复刻</a>：\
+<span class="xtb-image"><a href="/blhx/%E7%8E%AF" title="环">\
+<img alt="环头像.jpg" src="https://example.test/e.jpg" /></a>\
+<a href="/blhx/%E7%8E%AF" title="环">\
+<span class="nowrap" style="color:#c90" title="环"><span class="AF">环</span></span></a></span>、\
+<span class="xtb-image"><a href="/blhx/BLACK%E2%98%85ROCK_SHOOTER" title="BLACK★ROCK SHOOTER">\
+<img alt="BRS头像.jpg" src="https://example.test/f.jpg" /></a>\
+<a href="/blhx/BLACK%E2%98%85ROCK_SHOOTER" title="BLACK★ROCK SHOOTER">\
+<span class="nowrap" style="color:#c90" title="BLACK★ROCK SHOOTER"><span class="AF">BLACK★ROCK SHOOTER</span></span></a></span></li>
+</ul>
+<dl><dd>（联动兵装为活动赠送，无需属性改装）</dd></dl>
+</div>
+"""
+
+
+def _insert_ship_with_armament(connection, name, ship_type, rarity, entry):
+    ship = app.insert_ship(
+        connection,
+        name,
+        "2023-08-17",
+        {"ship_type": ship_type, "rarity": rarity, "tech_points": []},
+    )
+    app.upsert_armament(connection, ship["id"], entry)
+    armament = connection.execute(
+        "SELECT id FROM armaments WHERE ship_id = ?", (ship["id"],)
+    ).fetchone()
+    return ship, armament["id"]
+
+
+class ArmamentTests(unittest.TestCase):
+    def test_parse_armament_entries(self):
+        entries = app.parse_armament_entries(ARMAMENT_PAGE_HTML)
+        self.assertEqual(
+            [entry["name"] for entry in entries],
+            ["欧根亲王", "拉菲", "让·巴尔", "特装型布里MKIII", "环", "BLACK★ROCK SHOOTER"],
+        )
+        # 常规兵装带日期；假名用原始名称，不采用 span.AF 的显示名。
+        self.assertEqual(entries[0]["release_date"], "2022-06-09")
+        self.assertFalse(entries[0]["is_collab"])
+        self.assertEqual(entries[1]["name"], "拉菲")
+        self.assertEqual(entries[2]["name"], "让·巴尔")
+        # 有日期的活动赠送兵装按常规处理，日期取显示日期而不是链接页的日期。
+        self.assertEqual(entries[3]["release_date"], "2023-04-01")
+        self.assertFalse(entries[3]["is_collab"])
+        # 联动没有日期，按列表先后编号。
+        self.assertTrue(entries[4]["is_collab"])
+        self.assertEqual(entries[4]["collab_group"], "DOA联动复刻")
+        self.assertEqual(entries[4]["collab_order"], 1)
+        self.assertEqual(entries[5]["collab_order"], 2)
+        self.assertEqual(entries[5]["release_date"], "")
+
+    def test_parse_armament_entries_requires_section(self):
+        with self.assertRaises(ValueError):
+            app.parse_armament_entries("<p>没有兵装列表</p>")
+
+    def test_armament_status_enhance_implies_built(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                _, armament_id = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+
+            result = app.update_armament_status(armament_id, "is_enhanced", True)
+            self.assertTrue(result["is_built"])
+            self.assertTrue(result["is_enhanced"])
+            # 取消强化不回退打造状态。
+            result = app.update_armament_status(armament_id, "is_enhanced", False)
+            self.assertTrue(result["is_built"])
+            self.assertFalse(result["is_enhanced"])
+
+            operations = app.list_operations(10)
+            self.assertTrue(
+                any("同时标记为打造完成" in item["message"] for item in operations)
+            )
+
+    def test_armament_status_validation_and_missing(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                _, armament_id = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+            with self.assertRaises(ValueError):
+                app.update_armament_status(armament_id, "is_idling", True)
+            with self.assertRaises(ValueError):
+                app.update_armament_status(armament_id, "is_built", "是")
+            self.assertIsNone(app.update_armament_status(999999, "is_built", True))
+            self.assertIsNone(app.clear_armament_statuses(999999))
+            self.assertIsNone(app.delete_armament(999999))
+
+    def test_armament_filters_and_status_filters(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                _, normal_id = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+                _, collab_id = _insert_ship_with_armament(
+                    connection,
+                    "环",
+                    "重巡",
+                    "超稀有",
+                    {
+                        "release_date": "",
+                        "is_collab": True,
+                        "collab_group": "DOA联动复刻",
+                        "collab_order": 1,
+                    },
+                )
+            app.update_armament_status(normal_id, "is_enhanced", True)
+
+            self.assertEqual(len(app.list_armaments({"group": "collab"})), 1)
+            self.assertEqual(len(app.list_armaments({"group": "normal"})), 1)
+            self.assertEqual(len(app.list_armaments({"is_collab": "是"})), 1)
+            self.assertEqual(len(app.list_armaments({"is_built": "是"})), 1)
+            self.assertEqual(len(app.list_armaments({"is_built": "否"})), 1)
+            self.assertEqual(len(app.list_armaments({"is_enhanced": "是"})), 1)
+            self.assertEqual(len(app.list_armaments({"ship_type": "驱逐"})), 1)
+            self.assertEqual(
+                [item["name"] for item in app.list_armaments({"name": "环"})], ["环"]
+            )
+            counts = app.count_pending_armament_statuses({})
+            self.assertEqual(counts["is_built"], 1)
+            self.assertEqual(counts["is_enhanced"], 1)
+            self.assertEqual(counts["pending"], 1)
+            # 常规兵装在前、联动按 Wiki 顺序在后。
+            self.assertEqual(
+                [item["name"] for item in app.list_armaments({})], ["拉菲", "环"]
+            )
+            self.assertEqual(app.armament_group_counts()["collab"]["built_count"], 1)
+
+    def test_armament_clear_and_delete_and_ship_cascade(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship, armament_id = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+            app.update_armament_status(armament_id, "is_enhanced", True)
+            cleared = app.clear_armament_statuses(armament_id)
+            self.assertIsNone(cleared["is_built"])
+            self.assertIsNone(cleared["is_enhanced"])
+
+            app.update_armament_status(armament_id, "is_built", True)
+            deleted = app.delete_armament(armament_id)
+            self.assertEqual(deleted["name"], "拉菲")
+            self.assertEqual(app.list_armaments({}), [])
+            # 陆装删除不影响舰船本身。
+            self.assertEqual(len(app.list_ships({})), 1)
+
+            with app.get_connection() as connection:
+                app.upsert_armament(
+                    connection,
+                    ship["id"],
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+            self.assertEqual(len(app.list_armaments({})), 1)
+            self.assertTrue(app.delete_ship(ship["id"]))
+            self.assertEqual(app.list_armaments({}), [])
+
+    def test_armament_sync_and_partial_sync(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                for name in ("欧根亲王", "拉菲", "让·巴尔", "特装型布里MKIII", "环",
+                             "BLACK★ROCK SHOOTER"):
+                    app.insert_ship(
+                        connection,
+                        name,
+                        "2023-08-17",
+                        {"ship_type": "驱逐", "rarity": "精锐", "tech_points": []},
+                    )
+
+            with patch(
+                "app.wiki.fetch_armament_entries",
+                return_value=app.parse_armament_entries(ARMAMENT_PAGE_HTML),
+            ), patch("app.wiki.fetch_release_entries", return_value=[]):
+                app._sync_wiki()
+
+            self.assertEqual(app.SYNC_STATE["armaments"], 6)
+            self.assertEqual(app.SYNC_STATE["errors"], [])
+            armaments = app.list_armaments({})
+            self.assertEqual(len(armaments), 6)
+            self.assertEqual(
+                next(item for item in armaments if item["name"] == "让·巴尔")[
+                    "release_date"
+                ],
+                "2022-07-14",
+            )
+            # 已有状态不被重复同步覆盖。
+            collab = next(item for item in armaments if item["name"] == "环")
+            app.update_armament_status(collab["id"], "is_enhanced", True)
+            with patch(
+                "app.wiki.fetch_armament_entries",
+                return_value=app.parse_armament_entries(ARMAMENT_PAGE_HTML),
+            ), patch("app.wiki.fetch_release_entries", return_value=[]):
+                app._sync_wiki()
+            after = app.find_armament_brief(collab["id"])
+            self.assertTrue(after["is_built"])
+            self.assertTrue(after["is_enhanced"])
+
+            # 少量同步只更新指定舰娘的兵装。
+            with patch(
+                "app.wiki.fetch_armament_entries",
+                return_value=app.parse_armament_entries(ARMAMENT_PAGE_HTML),
+            ), patch(
+                "app.wiki.fetch_release_entries",
+                return_value=[
+                    {"name": "拉菲", "release_date": "2017-05-25"},
+                ],
+            ), patch("app.wiki.fetch_ship_payload") as payload:
+                payload.return_value = {
+                    "name": "拉菲",
+                    "release_date": "2017-05-25",
+                    "ship_type": "驱逐",
+                    "rarity": "精锐",
+                    "tech_points": [],
+                }
+                app._sync_wiki(["拉菲"])
+            self.assertEqual(app.SYNC_STATE["armaments"], 1)
+
+    def test_armament_sync_reports_wiki_failure_without_breaking_ship_sync(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "拉菲",
+                    "2023-08-17",
+                    {"ship_type": "驱逐", "rarity": "精锐", "tech_points": []},
+                )
+            with patch(
+                "app.wiki.fetch_armament_entries", side_effect=ValueError("页面异常")
+            ), patch("app.wiki.fetch_release_entries", return_value=[]):
+                app._sync_wiki()
+            self.assertEqual(app.SYNC_STATE["status"], "完成")
+            self.assertTrue(
+                any("兵装页面" in error for error in app.SYNC_STATE["errors"])
+            )
+
+    def test_armament_target_limits_and_manual_targets(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                _, first_id = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+                _, second_id = _insert_ship_with_armament(
+                    connection,
+                    "亚利桑那",
+                    "战列",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+                _insert_ship_with_armament(
+                    connection,
+                    "环",
+                    "重巡",
+                    "超稀有",
+                    {
+                        "release_date": "",
+                        "is_collab": True,
+                        "collab_group": "DOA联动复刻",
+                        "collab_order": 1,
+                    },
+                )
+
+            config = app.toggle_armament_manual_target("normal", "is_built", first_id)
+            self.assertEqual(
+                config["armament_manual_targets"]["normal"]["is_built"], [first_id]
+            )
+            # 上限为 1 时不能再录入第二个。
+            with self.assertRaises(ValueError):
+                app.toggle_armament_manual_target("normal", "is_built", second_id)
+
+            config = app.save_armament_target_limit("normal", "is_built", 2)
+            self.assertEqual(config["armament_target_limits"]["normal"]["is_built"], 2)
+            app.toggle_armament_manual_target("normal", "is_built", second_id)
+
+            # 标记为打造完成后，该兵装从录入里被移除，名额释放。
+            app.update_armament_status(first_id, "is_built", True)
+            config = app.read_config()
+            self.assertEqual(
+                config["armament_manual_targets"].get("normal", {}).get("is_built"),
+                [second_id],
+            )
+
+            rows = app.next_armaments_by_group(
+                "both",
+                config["armament_manual_targets"],
+                config["armament_target_limits"],
+            )
+            # 推荐里常规兵装优先展示，联动排在后面。
+            self.assertEqual([row["group"] for row in rows], ["normal", "collab"])
+            self.assertEqual(
+                [row["group_label"] for row in rows], ["常规兵装", "联动兵装"]
+            )
+            normal_row = next(row for row in rows if row["group"] == "normal")
+            self.assertEqual(
+                [item["armament"]["name"] for item in normal_row["built_items"]],
+                ["亚利桑那"],
+            )
+
+            with self.assertRaises(ValueError):
+                app.save_armament_target_limit("normal", "is_built", 0)
+            with self.assertRaises(ValueError):
+                app.save_armament_target_limit("unknown", "is_built", 1)
+            with self.assertRaises(ValueError):
+                app.save_armament_target_limit("normal", "is_idling", 1)
+            with self.assertRaises(ValueError):
+                app.toggle_armament_manual_target("normal", "is_built", 999999)
+
+    def test_armament_config_survives_ship_config_writes(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "拉菲",
+                    "2023-08-17",
+                    {"ship_type": "驱逐", "rarity": "精锐", "tech_points": []},
+                )
+            app.save_armament_target_limit("collab", "is_built", 3)
+            # 保存推荐舰种、写入手工录入、清空舰船状态都不能丢掉兵装配置。
+            app.save_next_ship_types(["驱逐"])
+            app.save_target_limit("驱逐", "is_idling", 2)
+            config = app.read_config()
+            self.assertEqual(config["armament_target_limits"]["collab"]["is_built"], 3)
+
+    def test_clear_ships_clears_armaments(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                _, armament_id = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+            app.toggle_armament_manual_target("normal", "is_built", armament_id)
+            self.assertEqual(app.clear_ships(), 1)
+            self.assertEqual(app.list_armaments({}), [])
+            config = app.read_config()
+            self.assertEqual(config["armament_manual_targets"], {})
+            self.assertEqual(
+                config["armament_target_limits"], _default_armament_limits()
+            )
+            with app.get_connection() as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM armaments").fetchone()[0],
+                    0,
+                )
+
+    def test_armament_page_and_endpoints_exposed(self):
+        html = app.PAGE_HTML
+        self.assertIn("/api/armaments?", html)
+        self.assertIn("/api/armament/status", html)
+        self.assertIn("/api/armament/clear-status", html)
+        self.assertIn("/api/armament/delete", html)
+        self.assertIn("/api/armament-next-group?", html)
+        self.assertIn("/api/armament-target-limit", html)
+        self.assertIn("/api/armament-manual-target", html)
+        # 强化完成按钮排在打造完成之后；清除数据在删除之前。
+        built = html.index(">打造完成</button>")
+        enhanced = html.index(">强化完成</button>")
+        clear = html.index(">清除数据</button>", enhanced)
+        delete = html.index(">删除</button>", clear)
+        self.assertLess(built, enhanced)
+        self.assertLess(enhanced, clear)
+        self.assertLess(clear, delete)
+        for label in ("是否联动", "已打造", "已强化", "打造目标", "强化目标"):
+            self.assertIn(f'data-label="{label}"', html)
+        # 推荐顺序（常规在前）与筛选项顺序（是/否）互不影响。
+        self.assertEqual(app.ARMAMENT_RECOMMEND_GROUP_ORDER, ["normal", "collab"])
+        self.assertEqual(app.ARMAMENT_GROUP_ORDER, ["collab", "normal"])
 
 
 if __name__ == "__main__":

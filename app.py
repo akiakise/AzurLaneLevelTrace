@@ -10,12 +10,19 @@ from blhx.storage.config import (
     normalize_target_limit,
     read_config,
     remove_config,
+    save_armament_target_limit,
     save_next_ship_types,
     save_target_limit,
+    toggle_armament_manual_target,
     toggle_manual_target,
     write_config,
 )
 from blhx.core.constants import (
+    ARMAMENT_GROUP_LABELS,
+    ARMAMENT_GROUP_ORDER,
+    ARMAMENT_MANUAL_FIELDS,
+    ARMAMENT_RECOMMEND_GROUP_ORDER,
+    ARMAMENT_STATUS_FIELDS,
     BASE_DIR,
     BONUS_ATTRIBUTE_ORDER,
     BONUS_SHIP_TYPE_ORDER,
@@ -72,6 +79,18 @@ from blhx.domain.recommendations import (
 from blhx.web.server import TrackerHandler, main
 from blhx.core.constants import recommend_ship_type_sort_key
 from blhx.core.version import APP_VERSION
+from blhx.domain.armaments import (
+    armament_group_counts,
+    armament_row_to_dict,
+    clear_armament_statuses,
+    count_pending_armament_statuses,
+    delete_armament,
+    find_armament_brief,
+    list_armaments,
+    next_armaments_by_group,
+    update_armament_status,
+    upsert_armament,
+)
 from blhx.domain.ships import (
     clear_ship_statuses,
     clear_ships,
@@ -95,9 +114,12 @@ from blhx.domain.tech import (
 )
 from blhx.core.utils import clean_template_value, utc_now_text
 from blhx.datasource.wiki import (
+    ARMAMENT_WIKI_TITLE,
     WikiTableParser,
     acquire_wiki_request_slot,
     extract_ship_entries,
+    fetch_armament_entries,
+    parse_armament_entries,
     fetch_release_entries,
     fetch_ship_payload,
     fetch_ship_raw,
@@ -112,6 +134,26 @@ from blhx.datasource.wiki import (
 )
 
 __all__ = [
+    "ARMAMENT_GROUP_LABELS",
+    "ARMAMENT_GROUP_ORDER",
+    "ARMAMENT_MANUAL_FIELDS",
+    "ARMAMENT_RECOMMEND_GROUP_ORDER",
+    "ARMAMENT_STATUS_FIELDS",
+    "ARMAMENT_WIKI_TITLE",
+    "armament_group_counts",
+    "armament_row_to_dict",
+    "clear_armament_statuses",
+    "count_pending_armament_statuses",
+    "delete_armament",
+    "fetch_armament_entries",
+    "find_armament_brief",
+    "list_armaments",
+    "next_armaments_by_group",
+    "parse_armament_entries",
+    "save_armament_target_limit",
+    "toggle_armament_manual_target",
+    "update_armament_status",
+    "upsert_armament",
     "CSV_CONTENT_TYPE",
     "CsvFormatError",
     "IMPORT_HEADERS",

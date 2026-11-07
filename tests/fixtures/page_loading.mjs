@@ -134,6 +134,8 @@ for (const names of [null, ['古鹰']]) {
   await task;
   await h.reply('/api/sync/status', done);
   await h.reply('/api/ships?', { ships: [] });
+  await h.reply('/api/armaments?', { armaments: [], status_counts: {} });
+  // 舰船与兵装列表都刷新完成后才轮到推荐选项，推荐刷新失败要能解除锁定。
   await h.reply('/api/next-options', null, { error: '推荐刷新失败' });
   h.assertBusy(false);
   assert.equal(h.element('syncClose').disabled, false);

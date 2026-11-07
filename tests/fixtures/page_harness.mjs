@@ -9,7 +9,19 @@ const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
 
 export const done = { running: false, status: '完成', message: '处理完成', total: 2, processed: 2, skipped: 0, errors: [] };
 export const running = { ...done, running: true, status: '进行中', processed: 0 };
-export const config = { next_ship_types: ['重巡'], target_limits: {}, manual_targets: {} };
+export const armamentConfig = {
+  armament_target_limits: {
+    collab: { is_built: 1, is_enhanced: 1 },
+    normal: { is_built: 1, is_enhanced: 1 },
+  },
+  armament_manual_targets: {},
+};
+export const config = {
+  next_ship_types: ['重巡'],
+  target_limits: {},
+  manual_targets: {},
+  ...armamentConfig,
+};
 export const settle = () => new Promise(resolve => setImmediate(resolve));
 
 export function createHarness() {
@@ -108,10 +120,17 @@ export function createHarness() {
     togglePickerShip, changeTargetLimit, removeManualTarget, clearShipPickerTarget,
     deleteShip, confirmClearShips, toggleNextType, startSync, importCsv,
     refreshSyncStatus, refreshImportStatus, downloadImportResult,
+    completeArmamentStatus, clearArmamentStatus, deleteArmamentById,
+    changeArmamentTargetLimit, togglePickerArmament, removeArmamentManualTarget,
+    clearArmamentPickerTarget, openArmamentPicker, loadArmamentNextTargets,
     switchTab, tabFromHash,
     seed() {
       nextTypeConfig = ['重巡'];
-      pickerState = { shipType: '重巡', field: 'is_idling', keyword: '', timer: null };
+      pickerState = { kind: 'ship', shipType: '重巡', group: '', field: 'is_idling', keyword: '', timer: null };
+      armamentTargetLimits = {
+        collab: { is_built: 1, is_enhanced: 1 },
+        normal: { is_built: 1, is_enhanced: 1 },
+      };
     },
     renderTestShip(ship) { shipData = [ship]; renderShips(); },
   };`;
@@ -142,10 +161,12 @@ export function createHarness() {
       assert.equal(request.options.method || 'GET', 'GET', `意外写请求：${request.url}`);
       check(request);
       const payload = request.url.startsWith('/api/ships?') ? { ships: [] }
-        : request.url === '/api/config' ? config
-          : request.url === '/api/next-options' ? { ship_types: [{ ship_type: '重巡', idle_count: 1, train_count: 1 }] }
-            : request.url.startsWith('/api/next-group?') ? { rows: [] }
-              : assert.fail(`未定义响应：${request.url}`);
+        : request.url.startsWith('/api/armaments?') ? { armaments: [], status_counts: {} }
+          : request.url === '/api/config' ? config
+            : request.url === '/api/next-options' ? { ship_types: [{ ship_type: '重巡', idle_count: 1, train_count: 1 }] }
+              : request.url.startsWith('/api/next-group?') ? { rows: [] }
+                : request.url.startsWith('/api/armament-next-group?') ? { rows: [] }
+                  : assert.fail(`未定义响应：${request.url}`);
       await reply(request.url, payload);
     }
   }
