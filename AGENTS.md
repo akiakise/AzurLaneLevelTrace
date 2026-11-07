@@ -45,6 +45,7 @@
 - 推荐舰种点选即保存、取消即删除，页面用右下角 toast 提示，不再有“确认推荐”按钮。
 - 推荐舰种展示顺序固定为 `RECOMMEND_SHIP_TYPE_ORDER`（战列、战巡、航母、轻航、重巡、轻巡、驱逐），其余舰种按 `SHIP_TYPE_PINYIN` 拼音排序；不要改回 `SHIP_TYPE_ORDER`。
 - 挂机与练级都没有目标项的舰种必须在推荐结果中隐藏，由 `next_ships_by_type()` 负责过滤并排序。
+- 推荐舰种配置与舰船现状解绑：`save_next_ship_types()` 只校验舰种合法性（`known_ship_types()` = `SHIP_TYPE_ORDER` 全集 + 库中已存在舰种），不要求当前有可练级舰娘；`available_next_ship_types()` 返回全部合法舰种，无候选时计数为 0。配置在舰船全部完成后仍然保留，后续出现新的可练级舰船时自动参与推荐。不要恢复“舰种不存在或已无可练级舰娘”的配置校验。
 - 每个舰种的挂机/练级目标数量由 `target_limits` 控制（1–10，默认 1）；手动录入优先占位，剩余名额由自动推荐补齐，录入数量不得超过上限。
 - CSV 导入必须复用全量同步的交互：服务端后台任务 + `GET /api/import/status` 轮询进度弹窗 + 完成后从 `GET /api/import/result` 下载结果。导入完成后必须整页刷新（`window.location.reload()`），不得只做局部刷新；刷新要放在结果文件下载触发之后，避免中断下载。
 - 表格操作列顺序固定为“已挂机”“已练级”“清除数据”“删除”；“清除数据”调用 `clear_ship_statuses()` 把 `is_idling` 与 `is_trained` 一并恢复为 `NULL` 并写入操作历史。

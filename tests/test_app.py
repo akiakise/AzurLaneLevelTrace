@@ -836,8 +836,69 @@ class AppTests(unittest.TestCase):
                         "manual_targets": {},
                     },
                 )
+            # 推荐舰种与舰船现状解绑：库里没有驱逐舰也能配置驱逐。
+            saved = app.save_next_ship_types(["战列", "驱逐"])
+            self.assertEqual(saved, ["战列", "驱逐"])
+            self.assertEqual(
+                app.read_config()["next_ship_types"], ["战列", "驱逐"]
+            )
+            # 非法舰种仍然拒绝。
             with self.assertRaises(ValueError):
-                app.save_next_ship_types(["战列", "驱逐"])
+                app.save_next_ship_types(["战列", "不存在舰种"])
+
+    def test_recommend_config_survives_until_ship_appears(self):
+        """配置先于舰船存在：空库可配置，后续出现可练级舰船后自动参与推荐。"""
+        with isolated_app_data():
+            # 空库状态下即可配置推荐舰种，不受“必须有可练级舰娘”限制。
+            self.assertEqual(
+                app.save_next_ship_types(["重巡", "驱逐"]), ["重巡", "驱逐"]
+            )
+            self.assertEqual(
+                app.read_config()["next_ship_types"], ["重巡", "驱逐"]
+            )
+            # 配置保留：此时两个舰种计数都是 0，分组推荐返回空行。
+            options = {item["ship_type"]: item for item in app.available_next_ship_types()}
+            self.assertEqual(options["重巡"]["idle_count"], 0)
+            self.assertEqual(options["重巡"]["train_count"], 0)
+            self.assertEqual(app.next_ships_by_type("both", ["重巡", "驱逐"]), [])
+
+            # 后续同步/导入出新的可练级舰船，既有配置无需改动即自动生效。
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2017-05-25",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {
+                                "stage": "达到120级",
+                                "attribute": "重巡/轻巡 机动",
+                                "points": 5,
+                            }
+                        ],
+                    },
+                )
+            config = app.read_config()
+            self.assertEqual(config["next_ship_types"], ["重巡", "驱逐"])
+            rows = app.next_ships_by_type(
+                "both",
+                config["next_ship_types"],
+                config["manual_targets"],
+                config["target_limits"],
+            )
+            self.assertEqual([row["ship_type"] for row in rows], ["重巡"])
+            self.assertEqual(rows[0]["idle"]["name"], "古鹰")
+            self.assertTrue(rows[0]["idle_manual_stale"] is False)
+
+            # 舰船全部练级完成后配置仍然保留，等待下一批舰船。
+            app.update_ship_status(
+                app.list_ships({"name": "古鹰"})[0]["id"], "is_trained", True
+            )
+            self.assertEqual(
+                app.read_config()["next_ship_types"], ["重巡", "驱逐"]
+            )
 
     def test_next_ship_supports_available_ship_types(self):
         with isolated_app_data():
@@ -899,13 +960,16 @@ class AppTests(unittest.TestCase):
                 "标记为已练级完成：夕立（同时标记为已挂机完成）",
             )
 
-            options = app.available_next_ship_types()
+            options = {item["ship_type"]: item for item in app.available_next_ship_types()}
+            # 选项以舰种常量全集为准，没有可练级舰娘的舰种也保留，计数为 0。
             self.assertEqual(
-                options,
-                [
-                    {"ship_type": "战列", "idle_count": 1, "train_count": 0},
-                    {"ship_type": "重巡", "idle_count": 1, "train_count": 0},
-                ],
+                options["战列"], {"ship_type": "战列", "idle_count": 1, "train_count": 0}
+            )
+            self.assertEqual(
+                options["重巡"], {"ship_type": "重巡", "idle_count": 1, "train_count": 0}
+            )
+            self.assertEqual(
+                options["驱逐"], {"ship_type": "驱逐", "idle_count": 0, "train_count": 0}
             )
             self.assertIsNone(
                 app.next_ship("train", ship_types=["战列", "重巡"])
@@ -916,13 +980,12 @@ class AppTests(unittest.TestCase):
 
             app.update_ship_status(battle_ship["id"], "is_idling", True)
             app.update_ship_status(heavy_cruiser["id"], "is_idling", True)
-            options = app.available_next_ship_types()
+            options = {item["ship_type"]: item for item in app.available_next_ship_types()}
             self.assertEqual(
-                options,
-                [
-                    {"ship_type": "战列", "idle_count": 0, "train_count": 1},
-                    {"ship_type": "重巡", "idle_count": 0, "train_count": 1},
-                ],
+                options["战列"], {"ship_type": "战列", "idle_count": 0, "train_count": 1}
+            )
+            self.assertEqual(
+                options["重巡"], {"ship_type": "重巡", "idle_count": 0, "train_count": 1}
             )
             ships = app.list_ships({"ship_types": ["战列", "重巡"]})
             self.assertEqual(

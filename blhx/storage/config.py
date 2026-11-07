@@ -189,24 +189,16 @@ def save_next_ship_types(ship_types: list[str]) -> list[str]:
 
 
 def _save_next_ship_types(ship_types: list[str]) -> list[str]:
-    from ..domain.recommendations import available_next_ship_types
+    from ..domain.recommendations import _validate_known_ship_types
 
     if not isinstance(ship_types, list) or not all(
         isinstance(value, str) for value in ship_types
     ):
         raise ValueError("next_ship_types 必须是舰种列表")
     ship_types = _normalize_ship_type_list(ship_types)
-    if ship_types:
-        available_types = {
-            option["ship_type"] for option in available_next_ship_types()
-        }
-        unavailable_types = [
-            value for value in ship_types if value not in available_types
-        ]
-        if unavailable_types:
-            raise ValueError(
-                "舰种不存在或已无可练级舰娘：" + "、".join(unavailable_types)
-            )
+    # 推荐舰种与舰船现状解绑：只要舰种合法就可以保存，即使当前没有可练级舰娘。
+    # 后续同步/导入出现新的可练级舰船时，推荐页面会按既有配置自动更新。
+    _validate_known_ship_types(ship_types)
     current = read_config()
     write_config(
         {

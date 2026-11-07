@@ -6,6 +6,7 @@ from ..core.constants import (
     DEFAULT_TECH_PRIORITY,
     normalize_ship_type,
     RARITY_PRIORITY_ORDER,
+    SHIP_TYPE_ORDER,
     TECH_PRIORITY_BY_TYPE,
     recommend_ship_type_sort_key,
 )
@@ -37,6 +38,12 @@ def tech_priority_rank(ship: dict[str, Any]) -> int:
 
 
 def available_next_ship_types() -> list[dict[str, Any]]:
+    """可配置的推荐舰种。
+
+    可选范围只取决于舰种常量全集，与数据库当前是否有可练级舰娘无关：
+    舰种可以先行配置，等后续同步或导入出新的可练级舰船后自动参与推荐。
+    当前没有候选时计数为 0，页面照常展示 0 / 0。
+    """
     with get_connection() as connection:
         rows = connection.execute(
             """
@@ -50,14 +57,35 @@ def available_next_ship_types() -> list[dict[str, Any]]:
             GROUP BY ship_type
             """
         ).fetchall()
+    counts = {
+        normalize_ship_type(row["ship_type"]): {
+            "idle_count": row["idle_count"],
+            "train_count": row["train_count"],
+        }
+        for row in rows
+    }
+    # 以常量全集为准；别名归一后去重，避免风帆M/S/V 生成重复选项。
+    ship_types = list(
+        dict.fromkeys(
+            normalized
+            for normalized in (
+                normalize_ship_type(value) for value in SHIP_TYPE_ORDER
+            )
+            if normalized
+        )
+    )
+    # 数据库中出现但常量未覆盖的舰种也一并保留，避免既有配置无法再选中。
+    ship_types.extend(
+        ship_type for ship_type in counts if ship_type not in ship_types
+    )
     return sorted(
         (
             {
-                "ship_type": row["ship_type"],
-                "idle_count": row["idle_count"],
-                "train_count": row["train_count"],
+                "ship_type": ship_type,
+                "idle_count": counts.get(ship_type, {}).get("idle_count", 0),
+                "train_count": counts.get(ship_type, {}).get("train_count", 0),
             }
-            for row in rows
+            for ship_type in ship_types
         ),
         key=lambda option: recommend_ship_type_sort_key(option["ship_type"]),
     )
@@ -81,11 +109,46 @@ def _normalize_ship_types(
     )
 
 
+def known_ship_types() -> list[str]:
+    """全部合法舰种（常量全集 + 库中已存在舰种），用于配置校验。"""
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT DISTINCT ship_type FROM ships WHERE ship_type <> ''"
+        ).fetchall()
+    ship_types = list(
+        dict.fromkeys(
+            normalized
+            for normalized in (
+                normalize_ship_type(value) for value in SHIP_TYPE_ORDER
+            )
+            if normalized
+        )
+    )
+    ship_types.extend(
+        normalize_ship_type(row["ship_type"])
+        for row in rows
+        if normalize_ship_type(row["ship_type"]) not in ship_types
+    )
+    return ship_types
+
+
+def _validate_known_ship_types(ship_types: list[str]) -> None:
+    """配置校验只要求舰种合法，不要求当前存在可练级舰娘。"""
+    if not ship_types:
+        return
+    known = set(known_ship_types())
+    unknown_types = [value for value in ship_types if value not in known]
+    if unknown_types:
+        raise ValueError("舰种不存在：" + "、".join(unknown_types))
+
+
 def _validate_ship_types(ship_types: list[str]) -> None:
     if not ship_types:
         return
     available_types = {
-        option["ship_type"] for option in available_next_ship_types()
+        option["ship_type"]
+        for option in available_next_ship_types()
+        if option["idle_count"] or option["train_count"]
     }
     unavailable_types = [
         value for value in ship_types if value not in available_types

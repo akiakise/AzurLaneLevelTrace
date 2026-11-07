@@ -63,6 +63,7 @@ from blhx.storage.history import list_operations, record_operation
 from blhx.web.page import PAGE_HTML
 from blhx.domain.recommendations import (
     available_next_ship_types,
+    known_ship_types,
     next_ship,
     next_ships_by_type,
     rarity_rank,
@@ -159,6 +160,7 @@ __all__ = [
     "count_pending_ship_statuses",
     "delete_ship",
     "empty_config",
+    "known_ship_types",
     "extract_ship_entries",
     "fetch_release_entries",
     "fetch_ship_payload",
