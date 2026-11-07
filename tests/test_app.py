@@ -2591,6 +2591,50 @@ class ArmamentTests(unittest.TestCase):
             )
             self.assertEqual(app.armament_group_counts()["collab"]["built_count"], 1)
 
+    def test_armament_pending_filter_matches_unbuilt_or_unenhanced(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                armament_ids = {}
+                for name in ("拉菲", "标枪", "绫波"):
+                    armament_ids[name] = _insert_ship_with_armament(
+                        connection,
+                        name,
+                        "驱逐",
+                        "精锐",
+                        {"release_date": "2022-06-09", "is_collab": False},
+                    )[1]
+            # 拉菲两项都未记录，标枪只打造未强化，绫波打造与强化都完成。
+            app.update_armament_status(armament_ids["标枪"], "is_built", True)
+            app.update_armament_status(armament_ids["绫波"], "is_enhanced", True)
+
+            pending_names = sorted(
+                item["name"] for item in app.list_armaments({"pending": "是"})
+            )
+            self.assertEqual(pending_names, sorted(["拉菲", "标枪"]))
+            # 未记录（NULL）与未完成（0）同样命中“未完成”，全部完成的绫波被排除。
+            self.assertEqual(
+                [
+                    item["name"]
+                    for item in app.list_armaments(
+                        {"pending": "是", "is_built": "是"}
+                    )
+                ],
+                ["标枪"],
+            )
+            # 只支持“是”；其他取值视为不筛选。
+            self.assertEqual(len(app.list_armaments({"pending": "否"})), 3)
+            self.assertEqual(len(app.list_armaments({"pending": ""})), 3)
+
+            counts = app.count_pending_armament_statuses({"is_built": "是"})
+            # 未打造计数忽略自身筛选，因此与“已打造 = 否”下结果一致。
+            self.assertEqual(
+                counts["is_built"],
+                app.count_pending_armament_statuses({"is_built": "否"})["is_built"],
+            )
+            # 未强化与未完成则叠加“已打造 = 是”，只剩只打造未强化的标枪。
+            self.assertEqual(counts["is_enhanced"], 1)
+            self.assertEqual(counts["pending"], 1)
+
     def test_armament_clear_and_delete_and_ship_cascade(self):
         with isolated_app_data():
             with app.get_connection() as connection:

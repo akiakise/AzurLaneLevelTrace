@@ -15,6 +15,13 @@ from ..storage.db import get_connection
 from ..storage.history import record_operation
 
 
+# “未完成”把打造与强化视为一组：任意一项不是已完成（未记录或未完成）即命中。
+# 必须用 COALESCE 兜住 NULL，否则 NOT (NULL = 1) 仍为 NULL，未记录的行会被漏掉。
+ARMAMENT_PENDING_CONDITION = (
+    "NOT (COALESCE(a.is_built, 0) = 1 AND COALESCE(a.is_enhanced, 0) = 1)"
+)
+
+
 # 兵装查询统一联表 ships，名称、舰种、稀有度都以舰船表为准。
 ARMAMENT_SELECT = """
     SELECT a.id, a.ship_id, a.release_date, a.is_collab, a.collab_group,
@@ -128,6 +135,9 @@ def _build_armament_conditions(
             conditions.append(f"a.{field} = 1")
         elif value == "否":
             conditions.append(f"COALESCE(a.{field}, 0) = 0")
+    # 未完成 = 未打造或未强化，仅“是”需要筛选，“否”等同不筛选。
+    if str(filters.get("pending") or "").strip() == "是":
+        conditions.append(ARMAMENT_PENDING_CONDITION)
     return conditions, parameters
 
 
