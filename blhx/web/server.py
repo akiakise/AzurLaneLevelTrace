@@ -345,7 +345,7 @@ def main() -> None:
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     server = ThreadingHTTPServer((host, port), TrackerHandler)
-    print(f"碧蓝航线练级数据记录已启动: http://localhost:{port}", flush=True)
+    print(f"碧蓝航线数据记录已启动: http://localhost:{port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
