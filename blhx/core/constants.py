@@ -151,6 +151,13 @@ ARMAMENT_GROUP_FLAGS = {"collab": 1, "normal": 0}
 # 兵装状态字段与展示名；强化完成会自动联动打造完成，顺序即按钮顺序。
 ARMAMENT_STATUS_FIELDS = {"is_built": "打造", "is_enhanced": "强化"}
 ARMAMENT_MANUAL_FIELDS = ("is_built", "is_enhanced")
+# 兵装推荐只看三个特殊稀有度，其余稀有度一视同仁按实装日期排序。
+# 注意与舰船推荐的 RARITY_PRIORITY_ORDER 不同，不要复用。
+ARMAMENT_RARITY_PRIORITY = {
+    "海上传奇": 0,
+    "决战方案": 1,
+    "最高方案": 2,
+}
 
 SHIP_TYPE_RANK = {value: index for index, value in enumerate(SHIP_TYPE_ORDER)}
 RARITY_FILTER_RANK = {value: index for index, value in enumerate(RARITY_FILTER_ORDER)}

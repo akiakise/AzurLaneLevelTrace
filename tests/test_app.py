@@ -2701,6 +2701,83 @@ class ArmamentTests(unittest.TestCase):
                 any("兵装页面" in error for error in app.SYNC_STATE["errors"])
             )
 
+
+    def test_armament_recommend_sort_priority_rarity_then_date(self):
+        """海上传奇 > 决战方案 > 最高方案，其余稀有度一律按实装日期。"""
+        with isolated_app_data():
+            samples = [
+                # 名称, 稀有度, 实装日期：精心安排让“日期顺序”与“稀有度顺序”互相冲突
+                ("普通兵装早", "普通", "2022-01-01"),
+                ("超稀有兵装中", "超稀有", "2023-01-01"),
+                ("精锐兵装晚", "精锐", "2024-01-01"),
+                ("最高方案兵装晚", "最高方案", "2024-06-01"),
+                ("最高方案兵装早", "最高方案", "2023-06-01"),
+                ("决战方案兵装", "决战方案", "2024-09-01"),
+                ("海上传奇兵装", "海上传奇", "2024-12-01"),
+            ]
+            with app.get_connection() as connection:
+                ids = {}
+                for name, rarity, date in samples:
+                    _, armament_id = _insert_ship_with_armament(
+                        connection,
+                        name,
+                        "驱逐",
+                        rarity,
+                        {"release_date": date, "is_collab": False},
+                    )
+                    ids[name] = armament_id
+
+            config = app.read_config()
+            row = next(
+                item
+                for item in app.next_armaments_by_group(
+                    "both",
+                    config["armament_manual_targets"],
+                    {"normal": {"is_built": 10, "is_enhanced": 1}},
+                )
+                if item["group"] == "normal"
+            )
+            order = [item["armament"]["name"] for item in row["built_items"]]
+            self.assertEqual(
+                order,
+                [
+                    # 三个特殊稀有度优先，彼此按优先级
+                    "海上传奇兵装",
+                    "决战方案兵装",
+                    "最高方案兵装早",
+                    "最高方案兵装晚",
+                    # 其余稀有度不区分高低，只按实装日期升序
+                    "普通兵装早",
+                    "超稀有兵装中",
+                    "精锐兵装晚",
+                ],
+            )
+            # 普通/精锐/超稀有 之间不再有稀有度高低之分。
+            self.assertLess(order.index("普通兵装早"), order.index("精锐兵装晚"))
+            self.assertLess(order.index("超稀有兵装中"), order.index("精锐兵装晚"))
+
+    def test_armament_sort_key_falls_back_to_wiki_order_for_collab(self):
+        """联动兵装没有实装日期，按 Wiki 列表顺序。"""
+        collab = [
+            {"name": "二", "rarity": "超稀有", "release_date": "", "collab_order": 2},
+            {"name": "一", "rarity": "普通", "release_date": "", "collab_order": 1},
+        ]
+        from blhx.domain.armaments import _armament_sort_key
+
+        self.assertEqual(
+            [item["name"] for item in sorted(collab, key=_armament_sort_key)],
+            ["一", "二"],
+        )
+        # 常规兵装即使日期更晚，没有特殊稀有度时也排在特殊稀有度之后。
+        mixed = [
+            {"name": "常规早", "rarity": "普通", "release_date": "2022-01-01", "collab_order": 0},
+            {"name": "最高方案", "rarity": "最高方案", "release_date": "2026-01-01", "collab_order": 0},
+        ]
+        self.assertEqual(
+            [item["name"] for item in sorted(mixed, key=_armament_sort_key)],
+            ["最高方案", "常规早"],
+        )
+
     def test_armament_target_limits_and_manual_targets(self):
         with isolated_app_data():
             with app.get_connection() as connection:

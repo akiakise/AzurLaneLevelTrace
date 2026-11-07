@@ -6,6 +6,7 @@ from typing import Any
 from ..core.constants import (
     ARMAMENT_GROUP_FLAGS,
     ARMAMENT_GROUP_LABELS,
+    ARMAMENT_RARITY_PRIORITY,
     ARMAMENT_RECOMMEND_GROUP_ORDER,
     ARMAMENT_STATUS_FIELDS,
 )
@@ -379,21 +380,16 @@ def _release_completed_armament_targets(armament_id: int) -> None:
         )
 
 
-RARITY_PRIORITY = {
-    "海上传奇": 0,
-    "决战方案": 1,
-    "普通": 2,
-    "稀有": 3,
-    "精锐": 4,
-    "超稀有": 5,
-    "最高方案": 6,
-}
-
-
 def _armament_sort_key(armament: dict[str, Any]) -> tuple[Any, ...]:
-    """排序：稀有度优先级 → 实装日期 → 名称；联动没有日期时保持 Wiki 顺序。"""
+    """排序：海上传奇、决战方案、最高方案优先，其余按实装日期。
+
+    三个特殊稀有度之后再按实装日期升序；联动兵装没有日期，退回 Wiki 列表顺序。
+    名称只用于兜底，避免同日期时顺序不稳定。
+    """
     return (
-        RARITY_PRIORITY.get(armament["rarity"], len(RARITY_PRIORITY)),
+        ARMAMENT_RARITY_PRIORITY.get(
+            armament["rarity"], len(ARMAMENT_RARITY_PRIORITY)
+        ),
         armament["release_date"] or "9999-99-99",
         armament["collab_order"],
         armament["name"],
