@@ -1924,6 +1924,62 @@ class AppTests(unittest.TestCase):
             self.assertIn(f'data-label="{label}"', html)
         self.assertIn('env(safe-area-inset-bottom)', html)
 
+    def test_page_tabs_split_recommend_training_and_equipment(self):
+        html = app.PAGE_HTML
+        # 三个 Tab 与对应面板一一绑定，且只有推荐页面默认展开。
+        self.assertIn('role="tablist"', html)
+        for tab, panel, label in (
+            ("recommend", "panelRecommend", "推荐页面"),
+            ("training", "panelTraining", "练级列表"),
+            ("equipment", "panelEquipment", "兵装列表"),
+        ):
+            self.assertIn(f'data-tab="{tab}"', html)
+            self.assertIn(f'id="{panel}"', html)
+            self.assertIn(f'aria-controls="{panel}"', html)
+            self.assertIn(f'aria-labelledby="tab{tab.capitalize()}"', html)
+            self.assertIn(label, html)
+        self.assertIn('id="panelRecommend" aria-labelledby="tabRecommend"', html)
+        self.assertIn('id="panelTraining" aria-labelledby="tabTraining" hidden', html)
+        self.assertIn('id="panelEquipment" aria-labelledby="tabEquipment" hidden', html)
+        # 推荐配置与推荐目标留在推荐页，舰船筛选表格迁到练级列表，不同时出现在两个面板。
+        recommend_panel = html[html.index('id="panelRecommend"'):html.index('id="panelTraining"')]
+        training_panel = html[html.index('id="panelTraining"'):html.index('id="panelEquipment"')]
+        self.assertIn('id="nextTypeOptions"', recommend_panel)
+        self.assertIn('id="nextTargets"', recommend_panel)
+        self.assertNotIn('id="shipTable"', recommend_panel)
+        self.assertIn('id="shipTable"', training_panel)
+        self.assertIn('id="filterGroups"', training_panel)
+        self.assertNotIn('id="nextTargets"', training_panel)
+        # 兵装列表仅占位，不承载任何数据请求或表格。
+        equipment_panel = html[html.index('id="panelEquipment"'):html.index('<script>')]
+        self.assertIn('功能占位，暂未实现', equipment_panel)
+        self.assertNotIn('id="shipTable"', equipment_panel)
+        self.assertNotIn('id="nextTargets"', equipment_panel)
+        # 切换逻辑：选中态同步、hash 记忆、键盘导航。
+        self.assertIn("function switchTab(name, focusTab = false) {", html)
+        self.assertIn("button.setAttribute('aria-selected', String(selected));", html)
+        self.assertIn("document.getElementById(item.panel).hidden = !selected;", html)
+        self.assertIn("function tabFromHash() {", html)
+        self.assertIn("const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];", html)
+        self.assertIn("if (!keys.includes(event.key)) return;", html)
+        self.assertIn('switchTab(tabFromHash());', html)
+        self.assertIn(".tab-panel[hidden] { display:none; }", html)
+        self.assertIn('.tab[aria-selected="true"]', html)
+
+    def test_page_tab_switching(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("未安装 node，跳过 Tab 切换回归")
+        fixture = Path(__file__).with_name("fixtures") / "page_tabs.mjs"
+        result = subprocess.run(
+            [node, str(fixture)], capture_output=True, text=True, timeout=60
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("断言: true", result.stdout)
+
     def test_import_triggers_full_page_reload(self):
         import shutil
         import subprocess

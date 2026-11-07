@@ -64,8 +64,7 @@ export function createHarness() {
     body: element('body'),
     activeElement: element('originalFocus'),
     getElementById: element,
-    querySelector: selector => element(selector),
-    querySelectorAll: selector => {
+    querySelector: selector => element(selector),    querySelectorAll: selector => {
       assert.equal(selector, '.container, .modal-overlay');
       return [element('.container'), ...overlays];
     },
@@ -73,9 +72,24 @@ export function createHarness() {
     addEventListener: (name, callback) => documentListeners.set(name, callback),
     dispatch: (name, event) => documentListeners.get(name)?.(event),
   };
+  const windowListeners = new Map();
+  // 极简地址栏：replaceState 写入 pathname/hash，并同步暴露给被测脚本。
+  const location = { pathname: '/', hash: '' };
   const sandbox = {
     document,
-    window: { location: { reload: () => events.push({ type: 'reload' }) } },
+    window: {
+      location: Object.assign(location, { reload: () => events.push({ type: 'reload' }) }),
+      history: {
+        replaceState: (state, title, url) => {
+          const text = String(url || '');
+          const index = text.indexOf('#');
+          location.pathname = index >= 0 ? (text.slice(0, index) || '/') : text;
+          location.hash = index >= 0 ? text.slice(index) : '';
+        },
+      },
+      addEventListener: (name, callback) => windowListeners.set(name, callback),
+      dispatch: (name, event) => windowListeners.get(name)?.(event),
+    },
     URLSearchParams,
     FormData: class { append() {} },
     fetch: (url, options = {}) => new Promise((resolve, reject) => {
@@ -92,6 +106,7 @@ export function createHarness() {
     togglePickerShip, changeTargetLimit, removeManualTarget, clearShipPickerTarget,
     deleteShip, confirmClearShips, toggleNextType, startSync, importCsv,
     refreshSyncStatus, refreshImportStatus, downloadImportResult,
+    switchTab, tabFromHash,
     seed() {
       nextTypeConfig = ['重巡'];
       pickerState = { shipType: '重巡', field: 'is_idling', keyword: '', timer: null };
@@ -139,5 +154,5 @@ export function createHarness() {
     assert.equal(element('loadingOverlay').classList.contains('active'), generic, '普通写操作遮罩');
     if (expected) assert.equal(document.body.getAttribute('aria-busy'), 'true');
   }
-  return { api, document, element, requests, pending, events, timers, reply, runTimer, finishReads, assertBusy };
+  return { api, document, window: sandbox.window, location, element, requests, pending, events, timers, reply, runTimer, finishReads, assertBusy };
 }
