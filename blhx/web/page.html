@@ -1890,6 +1890,12 @@
       const chip = event.target.closest('button.chip');
       if (!chip) return;
       filterState[chip.dataset.group] = chip.dataset.value;
+      // 自定义标签与“是否需要练级”正交（小船本身就是无科技点），
+      // 选中标签时把“需要练级”放回“全部”，否则默认的“是”会把结果滤空。
+      if (chip.dataset.group === 'ship_type'
+        && filterOptions.customShipTags.includes(chip.dataset.value)) {
+        filterState.needs_training = '';
+      }
       renderFilters();
       loadShips();
     });

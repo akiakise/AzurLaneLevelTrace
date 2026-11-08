@@ -10,8 +10,8 @@ from ..core.constants import (
     bonus_attribute_sort_key,
     bonus_ship_type_sort_key,
     normalize_ship_type,
+    ship_tag_condition,
     ship_tag_match_condition,
-    ship_tag_select_conditions,
     split_ship_tags,
     tech_stage_sort_key,
 )
@@ -157,25 +157,50 @@ def insert_ship(
 
 
 def refresh_ship_tags(
-    connection: sqlite3.Connection, ship_id: int | None = None
+    connection: sqlite3.Connection,
+    ship_id: int | None = None,
+    category_tags: dict[str, set[str]] | None = None,
 ) -> int:
-    """按标签规则重算并写入 ships.tags，返回更新条数。
+    """重算并写入 ships.tags，返回更新条数。
 
-    标签规则（CUSTOM_SHIP_TAG_RULES）是唯一事实来源：同步写入与页面筛选共用
-    同一份 SQL 条件，避免“写进标签却筛不到”。同步时会顺带写入初值，
-    存量数据需要一次全量同步重刷才能补上 tags 列。
+    标签分两类来源，合并后写入同一列：
+
+    - 本地规则型（`CUSTOM_SHIP_TAG_RULES`）：用 SQL 从舰船自身字段判定，如“小船”。
+    - 名称集合型（`CATEGORY_SHIP_TAGS`）：成员由同步流程从 Wiki 分类抓取后传入，
+      如“联动”，无法用本地字段表达。
+
+    同步时会顺带写入初值，存量数据需要一次全量同步重刷才能补上 tags 列。
+    未传入名称集合时，对应标签按不命中处理，避免重刷清空已有标签。
     """
-    pairs = ship_tag_select_conditions("")
-    if not pairs:
-        return 0
-    # 命中多个标签时用 `/` 拼接；一个都不命中写空串，重刷后能清掉历史残留。
-    pieces: list[str] = []
-    for index, (tag, condition) in enumerate(pairs):
-        piece = f"CASE WHEN {condition} THEN '{tag}' ELSE '' END"
-        pieces.append(piece if index == 0 else f"'/' || {piece}")
+    category_tags = category_tags or {}
+    select_parts: list[str] = []
+    parameters: list[Any] = []
+    # 每个标签产出一个“命中则为标签名、否则空串”的片段。
+    for tag in CUSTOM_SHIP_TAGS:
+        rule = ship_tag_condition(tag, "")
+        if rule:
+            select_parts.append(f"CASE WHEN {rule} THEN '{tag}' ELSE '' END")
+        elif tag in category_tags:
+            names = sorted(category_tags[tag])
+            if names:
+                placeholders = ",".join("?" for _ in names)
+                select_parts.append(
+                    f"CASE WHEN name IN ({placeholders}) THEN '{tag}' ELSE '' END"
+                )
+                parameters.extend(names)
+            else:
+                select_parts.append("''")
+        else:
+            # 既无本地规则也未提供名称集合：本标签不命中，但保留占位以免影响拼接。
+            select_parts.append("''")
+    pieces = [
+        part if index == 0 else f"'/' || {part}"
+        for index, part in enumerate(select_parts)
+    ]
     tag_expression = "TRIM(REPLACE(" + " || ".join(pieces) + ", '//', '/'), '/')"
     where_clause = "WHERE id = ?" if ship_id is not None else ""
-    parameters: list[Any] = [ship_id] if ship_id is not None else []
+    if ship_id is not None:
+        parameters.append(ship_id)
     cursor = connection.execute(
         f"UPDATE ships SET tags = {tag_expression} {where_clause}",
         parameters,

@@ -368,6 +368,45 @@ def fetch_release_entries() -> list[dict[str, str]]:
     return list(entries_by_name.values())
 
 
+COLLAB_CATEGORY_TITLE = "Category:联动舰娘"
+
+
+def fetch_collab_ship_names() -> set[str]:
+    """读取「分类:联动舰娘」的全部成员名称，用于打联动标签。
+
+    用 MediaWiki 的 categorymembers 接口按标题取成员，比解析分类页面 HTML 稳定：
+    分类页是导航壳，成员列表由皮肤渲染，且部分舰船标题带重定向。
+    """
+    names: set[str] = set()
+    continuation: dict[str, Any] = {}
+    while True:
+        payload = fetch_wiki_api(
+            {
+                "action": "query",
+                "list": "categorymembers",
+                "cmtitle": COLLAB_CATEGORY_TITLE,
+                "cmlimit": "500",
+                "format": "json",
+                "formatversion": "2",
+                **continuation,
+            }
+        )
+        members = payload.get("query", {}).get("categorymembers", [])
+        if not isinstance(members, list):
+            LOGGER.error("Wiki API 联动分类响应结构异常，原始返回：%s", payload)
+            raise ValueError("Wiki API 联动分类响应结构异常")
+        for member in members:
+            title = str(member.get("title", "")).strip()
+            if title:
+                names.add(unquote(title.replace("_", " ")))
+        # 分类成员超过 500 时分页续取。
+        next_token = payload.get("continue")
+        if not isinstance(next_token, dict) or not next_token:
+            break
+        continuation = next_token
+    return names
+
+
 def fetch_ship_raw(ship_name: str) -> str:
     payload = fetch_wiki_api(
         {
@@ -440,12 +479,26 @@ def _begin_sync(target_names: list[str] | None = None) -> bool:
 
 
 def _refresh_ship_tags(connection, target_names: list[str] | None) -> None:
-    """重算 ships.tags；少量同步只刷新本次同步的舰船。"""
+    """重算 ships.tags；少量同步只刷新本次同步的舰船。
+
+    联动标签的成员来自 Wiki「分类:联动舰娘」，无法用本地字段推导，
+    因此在这里抓取名称集合并传给 refresh_ship_tags()。抓取失败时该标签
+    按不命中处理，不让整次同步失败。
+    """
+    from ..core.constants import COLLAB_SHIP_TAG
     from ..domain.ships import refresh_ship_tags
+
+    category_tags: dict[str, set[str]] = {}
+    SYNC_STATE["message"] = "正在读取联动舰娘分类"
+    try:
+        category_tags[COLLAB_SHIP_TAG] = fetch_collab_ship_names()
+    except Exception as error:
+        LOGGER.exception("读取联动舰娘分类失败")
+        SYNC_STATE["errors"].append(f"联动分类: {error}")
 
     try:
         if target_names is None:
-            refresh_ship_tags(connection)
+            refresh_ship_tags(connection, category_tags=category_tags)
             return
         ship_ids = [
             row["id"]
@@ -455,7 +508,7 @@ def _refresh_ship_tags(connection, target_names: list[str] | None) -> None:
             ).fetchall()
         ]
         for ship_id in ship_ids:
-            refresh_ship_tags(connection, ship_id)
+            refresh_ship_tags(connection, ship_id, category_tags=category_tags)
     except Exception as error:
         # 标签刷新失败不应让整次同步报错，数据字段本身已写入。
         LOGGER.exception("刷新舰船标签失败")

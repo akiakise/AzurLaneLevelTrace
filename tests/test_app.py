@@ -1972,6 +1972,9 @@ class AppTests(unittest.TestCase):
         # 默认仅展示需要练级的舰船，已练级不预设筛选；重置筛选后保持一致。
         self.assertIn("needs_training: '是',", html)
         self.assertIn("filterState.needs_training = '是';", html)
+        # 选中小船/联动这类自定义标签时，“需要练级”自动回到“全部”。
+        self.assertIn("filterOptions.customShipTags.includes(chip.dataset.value)", html)
+        self.assertIn("filterState.needs_training = '';", html)
         self.assertIn("is_trained: ''", html)
         self.assertIn("filterState.is_trained = '';", html)
         # 已挂机/已练级筛选行展示未处理数量，数据来自 /api/ships 的 status_counts。
@@ -2505,8 +2508,8 @@ class AppTests(unittest.TestCase):
             self.assertEqual(tagged["tags"], ["小船"])
             self.assertEqual(app.list_ships({"ship_type": "航母"})[0]["tags"], [])
 
-    def test_placeholder_tag_matches_nothing(self):
-        """“联动”规则尚未实现：占位标签可筛选、可配置，但命中恒为 0。"""
+    def test_category_tag_without_sync_matches_nothing(self):
+        """“联动”是名称集合型标签：未同步（tags 为空）时命中 0，而不是报错。"""
         with isolated_app_data():
             with app.get_connection() as connection:
                 app.insert_ship(
@@ -2516,8 +2519,9 @@ class AppTests(unittest.TestCase):
                     {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
                 )
             self.assertIn("联动", app.CUSTOM_SHIP_TAGS)
-            # 占位标签没有规则，SQL 条件为 None，筛选结果为空而不是报错。
+            # 联动不由本地字段判定，规则为 None，成员来自 Wiki 分类。
             self.assertIsNone(app.ship_tag_condition("联动"))
+            self.assertIn("联动", app.CATEGORY_SHIP_TAGS)
             self.assertEqual(app.list_ships({"ship_type": "联动"}), [])
             # 仍可配置为推荐舰种，只是计数为 0；排序固定在最后。
             self.assertEqual(app.save_next_ship_types(["联动"]), ["联动"])
@@ -2710,6 +2714,170 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app.list_ships({"ship_type": "小船"}), [])
             connection_tags = app.list_ships({"ship_type": "航母"})[0]["tags"]
             self.assertEqual(connection_tags, ["小小船"])
+
+    def test_collab_tag_from_category_members(self):
+        """联动标签按 Wiki「分类:联动舰娘」成员写入，并支持筛选与推荐。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                collab = app.insert_ship(
+                    connection,
+                    "环",
+                    "2020-11-26",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "超稀有",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                normal = app.insert_ship(
+                    connection,
+                    "古鹰",
+                    "2020-11-26",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                # 联动舰船即使无科技点也应打标签，与“小船”规则互不影响。
+                small_collab = app.insert_ship(
+                    connection,
+                    "小赤城",
+                    "2020-11-26",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+
+            with app.get_connection() as connection:
+                app.refresh_ship_tags(
+                    connection, category_tags={app.COLLAB_SHIP_TAG: {"环", "小赤城"}}
+                )
+                tags = {
+                    row["name"]: row["tags"]
+                    for row in connection.execute("SELECT name, tags FROM ships")
+                }
+            self.assertEqual(tags["环"], "联动")
+            self.assertEqual(tags["古鹰"], "")
+            # 一个舰船可以同时命中多个标签。
+            self.assertEqual(tags["小赤城"], "小船/联动")
+
+            self.assertEqual(
+                sorted(item["name"] for item in app.list_ships({"ship_type": "联动"})),
+                sorted(["环", "小赤城"]),
+            )
+            # 标签与舰种正交：重巡筛选照常包含联动船。
+            self.assertEqual(
+                sorted(item["name"] for item in app.list_ships({"ship_type": "重巡"})),
+                sorted(["环", "古鹰"]),
+            )
+            self.assertEqual(
+                [item["name"] for item in app.list_ships({"ship_type": "小船"})],
+                ["小赤城"],
+            )
+            # 接口返回的 tags 是数组，供前端展示。
+            self.assertEqual(
+                app.list_ships({"ship_type": "小船"})[0]["tags"], ["小船", "联动"]
+            )
+
+            # 推荐侧也按 tags 统计与出候选。
+            options = {
+                item["ship_type"]: item for item in app.available_next_ship_types()
+            }
+            self.assertEqual(options["联动"]["idle_count"], 2)
+            rows = app.next_ships_by_type("both", ["联动"])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["ship_type"], "联动")
+
+    def test_collab_tag_requires_category_members(self):
+        """联动标签必须由名称集合驱动：未提供集合时按不命中处理。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "环",
+                    "2020-11-26",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "超稀有",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                app.refresh_ship_tags(
+                    connection, category_tags={app.COLLAB_SHIP_TAG: {"环"}}
+                )
+            self.assertEqual(
+                app.list_ships({"ship_type": "联动"})[0]["tags"], ["联动"]
+            )
+            # 未传名称集合时不命中该类标签。
+            with app.get_connection() as connection:
+                app.refresh_ship_tags(connection)
+            self.assertEqual(app.list_ships({"ship_type": "联动"}), [])
+
+    def test_full_sync_writes_collab_tag(self):
+        """全量同步会抓取联动分类并把成员写入 tags。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "环",
+                    "2020-11-26",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "超稀有",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
+                        ],
+                    },
+                )
+                connection.execute("UPDATE ships SET tags = ''")
+            with patch(
+                "app.wiki.fetch_collab_ship_names", return_value={"环"}
+            ), patch("app.wiki.fetch_release_entries", return_value=[]), patch(
+                "app.wiki.fetch_armament_entries", return_value=[]
+            ):
+                _reset_sync_state()
+                app._sync_wiki()
+            with app.get_connection() as connection:
+                tags = connection.execute(
+                    "SELECT tags FROM ships WHERE name = '环'"
+                ).fetchone()["tags"]
+            self.assertEqual(tags, "联动")
+            self.assertEqual(app.SYNC_STATE["errors"], [])
+            _reset_sync_state()
+
+    def test_collab_category_failure_does_not_break_sync(self):
+        """联动分类抓取失败只记录错误，不影响舰船与其它标签。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                connection.execute("UPDATE ships SET tags = ''")
+            with patch(
+                "app.wiki.fetch_collab_ship_names", side_effect=ValueError("接口异常")
+            ), patch("app.wiki.fetch_release_entries", return_value=[]), patch(
+                "app.wiki.fetch_armament_entries", return_value=[]
+            ):
+                _reset_sync_state()
+                app._sync_wiki()
+            self.assertEqual(app.SYNC_STATE["status"], "完成")
+            self.assertTrue(
+                any("联动分类" in item for item in app.SYNC_STATE["errors"])
+            )
+            # 其它标签照常写入。
+            self.assertEqual(
+                [item["name"] for item in app.list_ships({"ship_type": "小船"})],
+                ["小企业"],
+            )
+            _reset_sync_state()
 
     def test_init_db_migration_is_atomic(self):
         from unittest.mock import patch

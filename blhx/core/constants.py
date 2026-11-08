@@ -59,7 +59,7 @@ SHIP_TYPE_ORDER = [
 # 因此标签筛选不会影响原有舰种筛选，两者可以同时命中同一艘舰船。
 SMALL_SHIP_TAG = "小船"
 COLLAB_SHIP_TAG = "联动"
-# 标签全集；占位标签（联动）规则尚未实现，命中数恒为 0，但照常出现在筛选项与推荐配置里。
+# 标签全集，顺序即筛选与推荐里的展示顺序。
 CUSTOM_SHIP_TAGS = [SMALL_SHIP_TAG, COLLAB_SHIP_TAG]
 # “小船”的判定规则：没有科技点（无需练级）且名称以“小”开头。
 SMALL_SHIP_NAME_PREFIX = "小"
@@ -67,11 +67,14 @@ SMALL_SHIP_RULE = (
     "COALESCE({p}needs_training, 0) = 0"
     f" AND {{p}}name LIKE '{SMALL_SHIP_NAME_PREFIX}%'"
 )
-# 标签判定规则表：有规则的按 SQL 派生，没有规则的恒为空。
-# 新增标签时在这里登记规则，或留空表示暂时不命中任何舰船。
+# 标签判定规则表（本地可推导型）：按 SQL 从舰船自身字段派生。
+# 新增标签时在这里登记规则，或留空表示不由本地字段判定。
 CUSTOM_SHIP_TAG_RULES: dict[str, str] = {
     SMALL_SHIP_TAG: SMALL_SHIP_RULE,
 }
+# 需要由同步流程提供名称集合的标签：成员来自 Wiki 分类，规则无法用本地字段表达。
+# 同步时把抓到的名称集合交给 refresh_ship_tags() 一起写入 tags。
+CATEGORY_SHIP_TAGS = [COLLAB_SHIP_TAG]
 
 
 def ship_tag_condition(tag: str, alias: str = "s") -> str | None:
