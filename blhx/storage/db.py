@@ -6,7 +6,7 @@ from ..core.constants import DATA_DIR, DATABASE_PATH, normalize_ship_type
 from ..core.utils import clean_template_value
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @contextmanager
@@ -120,6 +120,26 @@ def _create_armaments_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _ships_columns(connection: sqlite3.Connection) -> set[str]:
+    return {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(ships)").fetchall()
+    }
+
+
+def _migrate_ships_tags(connection: sqlite3.Connection) -> None:
+    """为存量库补 ships.tags 列（自定义标签，`/` 分隔）。
+
+    只加列不填值：标签在同步时写入，存量数据由用户执行一次全量同步重刷。
+    筛选侧对“小船”另有 SQL 兜底判定，因此重刷前也能正常筛到。
+    """
+    if "tags" in _ships_columns(connection):
+        return
+    connection.execute(
+        "ALTER TABLE ships ADD COLUMN tags TEXT NOT NULL DEFAULT ''"
+    )
+
+
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with get_connection() as connection:
@@ -135,6 +155,7 @@ def init_db() -> None:
                 is_idling INTEGER,
                 is_trained INTEGER,
                 wiki_url TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -156,6 +177,8 @@ def init_db() -> None:
             """
         )
         _migrate_tech_points(connection)
+        # tags 列需在建表之后补，兼容已存在的旧库。
+        _migrate_ships_tags(connection)
         _create_armaments_table(connection)
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_tech_points_ship ON tech_points(ship_id)"

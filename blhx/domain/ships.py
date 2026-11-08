@@ -5,10 +5,14 @@ from typing import Any
 from urllib.parse import quote
 
 from ..core.constants import (
+    CUSTOM_SHIP_TAGS,
     WIKI_BASE_URL,
     bonus_attribute_sort_key,
     bonus_ship_type_sort_key,
     normalize_ship_type,
+    ship_tag_match_condition,
+    ship_tag_select_conditions,
+    split_ship_tags,
     tech_stage_sort_key,
 )
 from ..storage.config import remove_config
@@ -37,6 +41,7 @@ def ship_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "is_idling": None if row["is_idling"] is None else bool(row["is_idling"]),
         "is_trained": None if row["is_trained"] is None else bool(row["is_trained"]),
         "wiki_url": row["wiki_url"],
+        "tags": split_ship_tags(row["tags"]),
         "tech_points": [],
     }
 
@@ -125,6 +130,8 @@ def insert_ship(
     ship = connection.execute(
         "SELECT * FROM ships WHERE name = ?", (name,)
     ).fetchone()
+    # 标签在同步时写入；规则内含科技点判定，需在 needs_training 落库后再算。
+    refresh_ship_tags(connection, ship["id"])
     if overwrite:
         connection.execute("DELETE FROM tech_points WHERE ship_id = ?", (ship["id"],))
     for tech_point in parsed_ship["tech_points"]:
@@ -147,6 +154,33 @@ def insert_ship(
             ),
         )
     return ship
+
+
+def refresh_ship_tags(
+    connection: sqlite3.Connection, ship_id: int | None = None
+) -> int:
+    """按标签规则重算并写入 ships.tags，返回更新条数。
+
+    标签规则（CUSTOM_SHIP_TAG_RULES）是唯一事实来源：同步写入与页面筛选共用
+    同一份 SQL 条件，避免“写进标签却筛不到”。同步时会顺带写入初值，
+    存量数据需要一次全量同步重刷才能补上 tags 列。
+    """
+    pairs = ship_tag_select_conditions("")
+    if not pairs:
+        return 0
+    # 命中多个标签时用 `/` 拼接；一个都不命中写空串，重刷后能清掉历史残留。
+    pieces: list[str] = []
+    for index, (tag, condition) in enumerate(pairs):
+        piece = f"CASE WHEN {condition} THEN '{tag}' ELSE '' END"
+        pieces.append(piece if index == 0 else f"'/' || {piece}")
+    tag_expression = "TRIM(REPLACE(" + " || ".join(pieces) + ", '//', '/'), '/')"
+    where_clause = "WHERE id = ?" if ship_id is not None else ""
+    parameters: list[Any] = [ship_id] if ship_id is not None else []
+    cursor = connection.execute(
+        f"UPDATE ships SET tags = {tag_expression} {where_clause}",
+        parameters,
+    )
+    return cursor.rowcount
 
 
 def delete_ship(ship_id: int) -> bool:
@@ -245,15 +279,35 @@ def _build_ship_conditions(
             f"s.id IN ({','.join('?' for _ in ship_id_filters)})"
         )
         parameters.extend(ship_id_filters)
+    trainable_folded = False
     if ship_type_filters:
-        conditions.append(
-            f"s.ship_type IN ({','.join('?' for _ in ship_type_filters)})"
-        )
-        parameters.extend(ship_type_filters)
+        # 自定义标签与舰种正交：标签走独立判定，舰种照常等值匹配，
+        # 多个选项之间取并集，因此一艘小船既能被“小船”筛到，也能被原舰种筛到。
+        tag_types = [value for value in ship_type_filters if value in CUSTOM_SHIP_TAGS]
+        plain_types = [
+            value for value in ship_type_filters if value not in CUSTOM_SHIP_TAGS
+        ]
+        # 标签本身就允许无科技点（小船就是），不能把“需要练级 = 是”整条 AND 上去，
+        # 否则选中标签时结果恒为空；此时把它并进舰种分支内。
+        trainable_folded = bool(tag_types) and filters.get("needs_training") == "是"
+        type_conditions: list[str] = []
+        if plain_types:
+            plain_condition = (
+                f"s.ship_type IN ({','.join('?' for _ in plain_types)})"
+            )
+            if trainable_folded:
+                plain_condition = f"({plain_condition} AND s.needs_training = 1)"
+            type_conditions.append(plain_condition)
+            parameters.extend(plain_types)
+        # 标签一律按同步产出的 ships.tags 匹配，不按规则现算：
+        # 未重刷同步的存量数据 tags 为空，筛不到标签（跑一次全量同步即可）。
+        for tag in tag_types:
+            type_conditions.append(ship_tag_match_condition(tag, "s"))
+        conditions.append("(" + " OR ".join(type_conditions) + ")")
     if filters.get("rarity"):
         conditions.append("s.rarity = ?")
         parameters.append(filters["rarity"])
-    if filters.get("needs_training") in {"是", "否"}:
+    if filters.get("needs_training") in {"是", "否"} and not trainable_folded:
         conditions.append("s.needs_training = ?")
         parameters.append(1 if filters["needs_training"] == "是" else 0)
     if "is_idling" not in skip_fields and filters.get("is_idling") in {"是", "否"}:

@@ -9,6 +9,9 @@ from ..core.constants import (
     ARMAMENT_RARITY_PRIORITY,
     ARMAMENT_RECOMMEND_GROUP_ORDER,
     ARMAMENT_STATUS_FIELDS,
+    CUSTOM_SHIP_TAGS,
+    normalize_ship_type,
+    ship_tag_match_condition,
 )
 from ..core.utils import utc_now_text
 from ..storage.db import get_connection
@@ -116,9 +119,15 @@ def _build_armament_conditions(
     if armament_ids:
         conditions.append(f"a.id IN ({','.join('?' for _ in armament_ids)})")
         parameters.extend(armament_ids)
-    if filters.get("ship_type"):
+    ship_type_filter = normalize_ship_type(
+        str(filters.get("ship_type") or "").strip()
+    )
+    if ship_type_filter in CUSTOM_SHIP_TAGS:
+        # 自定义标签与舰种正交，按同步产出的 ships.tags 匹配。
+        conditions.append(ship_tag_match_condition(ship_type_filter, "s"))
+    elif ship_type_filter:
         conditions.append("s.ship_type = ?")
-        parameters.append(filters["ship_type"])
+        parameters.append(ship_type_filter)
     if filters.get("rarity"):
         conditions.append("s.rarity = ?")
         parameters.append(filters["rarity"])

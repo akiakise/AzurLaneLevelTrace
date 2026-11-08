@@ -54,6 +54,70 @@ SHIP_TYPE_ORDER = [
     "风帆",
 ]
 
+# 自定义标签：与舰种正交，一件舰船可以同时有自己的舰种和多个标签。
+# 标签在数据同步时写入 ships.tags（`/` 分隔），不改写 ships.ship_type，
+# 因此标签筛选不会影响原有舰种筛选，两者可以同时命中同一艘舰船。
+SMALL_SHIP_TAG = "小船"
+COLLAB_SHIP_TAG = "联动"
+# 标签全集；占位标签（联动）规则尚未实现，命中数恒为 0，但照常出现在筛选项与推荐配置里。
+CUSTOM_SHIP_TAGS = [SMALL_SHIP_TAG, COLLAB_SHIP_TAG]
+# “小船”的判定规则：没有科技点（无需练级）且名称以“小”开头。
+SMALL_SHIP_NAME_PREFIX = "小"
+SMALL_SHIP_RULE = (
+    "COALESCE({p}needs_training, 0) = 0"
+    f" AND {{p}}name LIKE '{SMALL_SHIP_NAME_PREFIX}%'"
+)
+# 标签判定规则表：有规则的按 SQL 派生，没有规则的恒为空。
+# 新增标签时在这里登记规则，或留空表示暂时不命中任何舰船。
+CUSTOM_SHIP_TAG_RULES: dict[str, str] = {
+    SMALL_SHIP_TAG: SMALL_SHIP_RULE,
+}
+
+
+def ship_tag_condition(tag: str, alias: str = "s") -> str | None:
+    """返回某标签的**计算规则** SQL 片段，仅用于同步时写入 ships.tags。
+
+    alias 传空串可生成不带表前缀的列名，供 UPDATE 语句复用。
+    没有规则的标签（如占位的“联动”）返回 None，写入时按不命中处理。
+
+    注意：筛选不使用这里的规则，而是查 ships.tags（见 ship_tag_match_condition）。
+    规则描述“这艘船该不该有该标签”，tags 列是同步产出的结果，两者分离，
+    未重刷同步的存量数据不会因为本地字段碰巧满足规则而凭空出现标签。
+    """
+    rule = CUSTOM_SHIP_TAG_RULES.get(tag)
+    if not rule:
+        return None
+    return rule.format(p=f"{alias}." if alias else "")
+
+
+def ship_tag_match_condition(tag: str, alias: str = "s") -> str:
+    """生成按 ships.tags 精确匹配某标签的 SQL 片段（`/` 分隔字段的成员判断）。
+
+    用前后加 `/` 再 instr 匹配，避免“小船”误命中“小小船”这类子串情况。
+    """
+    return f"instr('/' || COALESCE({{p}}tags, '') || '/', '/{tag}/') > 0".format(
+        p=f"{alias}." if alias else ""
+    )
+
+
+def ship_tag_select_conditions(alias: str = "s") -> list[tuple[str, str]]:
+    """返回 [(标签, SQL 条件)]，按 CUSTOM_SHIP_TAGS 顺序，跳过尚无规则的占位标签。"""
+    pairs: list[tuple[str, str]] = []
+    for tag in CUSTOM_SHIP_TAGS:
+        condition = ship_tag_condition(tag, alias)
+        if condition:
+            pairs.append((tag, condition))
+    return pairs
+
+
+def split_ship_tags(value: str) -> list[str]:
+    """把 `小船/联动` 形式的文本拆成标签列表，保持 CUSTOM_SHIP_TAGS 的顺序。"""
+    raw = {part.strip() for part in str(value or "").split("/") if part.strip()}
+    ordered = [tag for tag in CUSTOM_SHIP_TAGS if tag in raw]
+    ordered.extend(sorted(raw - set(CUSTOM_SHIP_TAGS)))
+    return ordered
+
+
 RARITY_FILTER_ORDER = [
     "普通",
     "稀有",
@@ -182,10 +246,18 @@ SHIP_TYPE_PINYIN = {
     "潜母": "qianmu",
     "运输": "yunshu",
     "风帆": "fengfan",
+    "小船": "xiaochuan",
+    "联动": "liandong",
 }
 
 RECOMMEND_SHIP_TYPE_RANK = {
     value: index for index, value in enumerate(RECOMMEND_SHIP_TYPE_ORDER)
+}
+# 自定义标签不参与固定优先项，统一排在所有推荐舰种（含未列出的舰种）之后，
+# 并按 CUSTOM_SHIP_TAGS 的声明顺序排列。
+CUSTOM_RECOMMEND_SHIP_TYPE_RANK = {
+    tag: len(RECOMMEND_SHIP_TYPE_ORDER) + len(SHIP_TYPE_ORDER) + index
+    for index, tag in enumerate(CUSTOM_SHIP_TAGS)
 }
 
 
@@ -204,7 +276,13 @@ def rarity_filter_sort_key(value: str) -> tuple[int, str]:
 
 
 def recommend_ship_type_sort_key(value: str) -> tuple[int, str, str]:
-    """推荐舰种展示顺序：固定优先项在前，其余按名称拼音排序。"""
+    """推荐舰种展示顺序：固定优先项在前，自定义标签最后，其余按名称拼音排序。"""
+    if value in CUSTOM_RECOMMEND_SHIP_TYPE_RANK:
+        return (
+            CUSTOM_RECOMMEND_SHIP_TYPE_RANK[value],
+            SHIP_TYPE_PINYIN.get(value, value),
+            value,
+        )
     return (
         RECOMMEND_SHIP_TYPE_RANK.get(value, len(RECOMMEND_SHIP_TYPE_RANK)),
         SHIP_TYPE_PINYIN.get(value, value),

@@ -439,6 +439,29 @@ def _begin_sync(target_names: list[str] | None = None) -> bool:
         return True
 
 
+def _refresh_ship_tags(connection, target_names: list[str] | None) -> None:
+    """重算 ships.tags；少量同步只刷新本次同步的舰船。"""
+    from ..domain.ships import refresh_ship_tags
+
+    try:
+        if target_names is None:
+            refresh_ship_tags(connection)
+            return
+        ship_ids = [
+            row["id"]
+            for row in connection.execute(
+                f"SELECT id FROM ships WHERE name IN ({','.join('?' for _ in target_names)})",
+                target_names,
+            ).fetchall()
+        ]
+        for ship_id in ship_ids:
+            refresh_ship_tags(connection, ship_id)
+    except Exception as error:
+        # 标签刷新失败不应让整次同步报错，数据字段本身已写入。
+        LOGGER.exception("刷新舰船标签失败")
+        SYNC_STATE["errors"].append(f"标签刷新: {error}")
+
+
 def _sync_armaments(
     connection,
     target_names: list[str] | None = None,
@@ -553,6 +576,9 @@ def _sync_wiki(target_names: list[str] | None = None) -> None:
                         LOGGER.exception("处理单舰 Wiki 数据失败: %s", ship_name)
                         SYNC_STATE["errors"].append(f"{ship_name}: {error}")
                         SYNC_STATE["message"] = f"处理 {ship_name} 时出错"
+            # 全量同步顺带重算全部标签：存量数据升级后 tags 为空，
+            # 跑一次全量同步即可补齐；少量同步只刷本次涉及的舰船。
+            _refresh_ship_tags(connection, target_names)
             _sync_armaments(connection, target_names)
         SYNC_STATE["status"] = "完成"
         SYNC_STATE["message"] = (

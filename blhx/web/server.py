@@ -19,6 +19,7 @@ from ..core.constants import (
     ARMAMENT_GROUP_ORDER,
     BONUS_ATTRIBUTE_ORDER,
     BONUS_SHIP_TYPE_ORDER,
+    CUSTOM_SHIP_TAGS,
     LOGGER,
     RARITY_FILTER_ORDER,
     RECOMMEND_SHIP_TYPE_ORDER,
@@ -200,7 +201,9 @@ class TrackerHandler(BaseHTTPRequestHandler):
             elif path == "/api/filter-options":
                 self.send_json(
                     {
-                        "ship_types": SHIP_TYPE_ORDER,
+                        # 自定义标签并入舰种筛选项，排在常规舰种之后。
+                        "ship_types": [*SHIP_TYPE_ORDER, *CUSTOM_SHIP_TAGS],
+                        "custom_ship_tags": CUSTOM_SHIP_TAGS,
                         "rarities": RARITY_FILTER_ORDER,
                         "bonus_ship_types": BONUS_SHIP_TYPE_ORDER,
                         "bonus_attributes": BONUS_ATTRIBUTE_ORDER,

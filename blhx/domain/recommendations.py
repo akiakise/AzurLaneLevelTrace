@@ -3,12 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.constants import (
+    CUSTOM_SHIP_TAGS,
     DEFAULT_TECH_PRIORITY,
     normalize_ship_type,
     RARITY_PRIORITY_ORDER,
     SHIP_TYPE_ORDER,
     TECH_PRIORITY_BY_TYPE,
     recommend_ship_type_sort_key,
+    ship_tag_match_condition,
 )
 from ..storage.db import get_connection
 from .ships import list_ships
@@ -38,10 +40,11 @@ def tech_priority_rank(ship: dict[str, Any]) -> int:
 
 
 def _pending_ship_type_counts() -> dict[str, dict[str, int]]:
-    """按舰种统计待挂机与待练级数量。
+    """按舰种或标签统计待挂机与待练级数量。
 
-    口径与推荐候选一致：只看需要练级且尚未练级的舰船。
+    舰种口径与推荐候选一致：只看需要练级且尚未练级的舰船。
     待挂机 = 其中还没挂机的，待练级 = 其中已经挂机、等待练级的。
+    标签口径按标签规则判定（标签与“是否需要练级”正交），同样排除已练级。
     类型徽标与推荐表格每行的数量都走这一份统计，避免两处口径漂移。
     """
     with get_connection() as connection:
@@ -57,13 +60,44 @@ def _pending_ship_type_counts() -> dict[str, dict[str, int]]:
             GROUP BY ship_type
             """
         ).fetchall()
-    return {
-        normalize_ship_type(row["ship_type"]): {
-            "idle_count": int(row["idle_count"] or 0),
-            "train_count": int(row["train_count"] or 0),
+        counts = {
+            normalize_ship_type(row["ship_type"]): {
+                "idle_count": int(row["idle_count"] or 0),
+                "train_count": int(row["train_count"] or 0),
+            }
+            for row in rows
         }
-        for row in rows
-    }
+        for tag in CUSTOM_SHIP_TAGS:
+            condition = ship_tag_match_condition(tag, "s")
+            row = connection.execute(
+                f"""
+                SELECT SUM(CASE WHEN COALESCE(s.is_idling, 0) = 0 THEN 1 ELSE 0 END)
+                           AS idle_count,
+                       SUM(CASE WHEN s.is_idling = 1 THEN 1 ELSE 0 END) AS train_count
+                FROM ships s
+                WHERE {condition}
+                  AND COALESCE(s.is_trained, 0) = 0
+                """
+            ).fetchone()
+            counts[tag] = {
+                "idle_count": int(row["idle_count"] or 0) if row else 0,
+                "train_count": int(row["train_count"] or 0) if row else 0,
+            }
+    return counts
+
+
+def _known_ship_type_names() -> list[str]:
+    """舰种常量全集（含自定义标签），别名归一后去重。"""
+    return list(
+        dict.fromkeys(
+            normalized
+            for normalized in (
+                normalize_ship_type(value)
+                for value in [*SHIP_TYPE_ORDER, *CUSTOM_SHIP_TAGS]
+            )
+            if normalized
+        )
+    )
 
 
 def available_next_ship_types() -> list[dict[str, Any]]:
@@ -72,18 +106,11 @@ def available_next_ship_types() -> list[dict[str, Any]]:
     可选范围只取决于舰种常量全集，与数据库当前是否有可练级舰娘无关：
     舰种可以先行配置，等后续同步或导入出新的可练级舰船后自动参与推荐。
     当前没有候选时计数为 0，页面照常展示 0 / 0。
+    自定义标签（小船、联动）也在可选范围内，排序固定排在最后。
     """
     counts = _pending_ship_type_counts()
     # 以常量全集为准；别名归一后去重，避免风帆M/S/V 生成重复选项。
-    ship_types = list(
-        dict.fromkeys(
-            normalized
-            for normalized in (
-                normalize_ship_type(value) for value in SHIP_TYPE_ORDER
-            )
-            if normalized
-        )
-    )
+    ship_types = _known_ship_type_names()
     # 数据库中出现但常量未覆盖的舰种也一并保留，避免既有配置无法再选中。
     ship_types.extend(
         ship_type for ship_type in counts if ship_type not in ship_types
@@ -120,20 +147,12 @@ def _normalize_ship_types(
 
 
 def known_ship_types() -> list[str]:
-    """全部合法舰种（常量全集 + 库中已存在舰种），用于配置校验。"""
+    """全部合法舰种（常量全集含自定义舰种 + 库中已存在舰种），用于配置校验。"""
     with get_connection() as connection:
         rows = connection.execute(
             "SELECT DISTINCT ship_type FROM ships WHERE ship_type <> ''"
         ).fetchall()
-    ship_types = list(
-        dict.fromkeys(
-            normalized
-            for normalized in (
-                normalize_ship_type(value) for value in SHIP_TYPE_ORDER
-            )
-            if normalized
-        )
-    )
+    ship_types = _known_ship_type_names()
     ship_types.extend(
         normalize_ship_type(row["ship_type"])
         for row in rows
@@ -189,12 +208,14 @@ def next_ship(
         raise ValueError("mode 必须是 idle 或 train")
     ship_types = _normalize_ship_types(ship_type, ship_types)
     _validate_ship_types(ship_types)
-    filters = {
+    filters: dict[str, Any] = {
         "ship_types": ship_types,
-        "needs_training": "是",
         "is_idling": "否" if mode == "idle" else "是",
         "is_trained": "否" if mode == "train" else "",
     }
+    # 只要选中项里没有标签，就仍然要求“需要练级 = 是”；标签候选不限制。
+    if not any(value in CUSTOM_SHIP_TAGS for value in ship_types):
+        filters["needs_training"] = "是"
     candidates = list_ships(filters)
     if not candidates:
         return None
@@ -225,6 +246,22 @@ def _manual_target_ships(
     ]
 
 
+def _mode_filters(ship_type: str, mode: str) -> dict[str, Any]:
+    """推荐候选的筛选条件。
+
+    舰种候选要求“需要练级 = 是”；标签与是否需要练级正交（小船本身就是无科技点），
+    因此标签候选不能带该条件，否则结果恒为空。
+    """
+    filters: dict[str, Any] = {
+        "ship_types": [ship_type],
+        "is_idling": "否" if mode == "idle" else "是",
+        "is_trained": "否" if mode == "train" else "",
+    }
+    if ship_type not in CUSTOM_SHIP_TAGS:
+        filters["needs_training"] = "是"
+    return filters
+
+
 def _auto_target_ships(
     ship_type: str,
     mode: str,
@@ -233,12 +270,7 @@ def _auto_target_ships(
 ) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
-    filters = {
-        "ship_types": [ship_type],
-        "needs_training": "是",
-        "is_idling": "否" if mode == "idle" else "是",
-        "is_trained": "否" if mode == "train" else "",
-    }
+    filters = _mode_filters(ship_type, mode)
     candidates = [
         ship for ship in list_ships(filters) if ship["id"] not in exclude_ids
     ]

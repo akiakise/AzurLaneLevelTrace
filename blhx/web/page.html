@@ -347,7 +347,7 @@
         <div id="message" class="status-line"></div>
         <div class="table-scroll">
           <table class="ships-table">
-            <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>已练级</th><th>操作</th></tr></thead>
+            <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>获得</th><th>120级</th><th>实装日期</th><th>是否需要练级</th><th>是否已挂机</th><th>是否已练级</th><th>操作</th></tr></thead>
             <tbody id="shipTable"><tr><td colspan="10" class="empty">加载中...</td></tr></tbody>
           </table>
         </div>
@@ -363,7 +363,7 @@
         <div id="armamentMessage" class="status-line"></div>
         <div class="table-scroll">
           <table class="ships-table armaments-table">
-            <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>是否联动</th><th>分类</th><th>实装日期</th><th>已打造</th><th>已强化</th><th>操作</th></tr></thead>
+            <thead><tr><th>舰船名称</th><th>舰种</th><th>稀有度</th><th>是否联动</th><th>分类</th><th>实装日期</th><th>是否已打造</th><th>是否已强化</th><th>操作</th></tr></thead>
             <tbody id="armamentTable"><tr><td colspan="9" class="empty">加载中...</td></tr></tbody>
           </table>
         </div>
@@ -378,7 +378,8 @@
       rarities: [],
       bonusShipTypes: [],
       bonusAttributes: [],
-      recommendShipTypes: []
+      recommendShipTypes: [],
+      customShipTags: []
     };
     let nextOptions = [];
     let statusCounts = { is_idling: null, is_trained: null, pending: null };
@@ -601,6 +602,14 @@
       }
     }
 
+    function shipTypeText(ship) {
+      // 自定义标签与舰种正交：舰种列照常显示原舰种，标签用中括号追加在后面。
+      const base = ship.ship_type || '';
+      const tags = ship.tags || [];
+      if (!tags.length) return base;
+      return base ? `${base}（${tags.join('、')}）` : tags.join('、');
+    }
+
     function renderShips() {
       const tbody = document.getElementById('shipTable');
       if (!shipData.length) {
@@ -625,14 +634,14 @@
         actionButtons.push(`<button type="button" class="danger" data-delete data-id="${escapeAttr(ship.id)}" data-name="${escapeAttr(ship.name)}">删除</button>`);
         return `<tr>
           <td data-label="舰船名称">${wikiLink(ship.wiki_url, ship.name)}</td>
-          <td data-label="舰种">${escapeHtml(ship.ship_type || '')}</td>
+          <td data-label="舰种">${escapeHtml(shipTypeText(ship))}</td>
           <td data-label="稀有度">${escapeHtml(ship.rarity || '')}</td>
           <td data-label="获得">${escapeHtml(stageTech('解锁图鉴'))}</td>
           <td data-label="120级">${escapeHtml(stageTech('达到120级'))}</td>
           <td data-label="实装日期">${escapeHtml(ship.release_date || '')}</td>
           <td data-label="是否需要练级" class="${ship.needs_training ? 'yes' : 'empty'}">${ship.needs_training ? '是' : '否'}</td>
           <td data-label="是否已挂机" class="${statusClass(ship.is_idling)}">${statusText(ship.is_idling)}</td>
-          <td data-label="已练级" class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
+          <td data-label="是否已练级" class="${statusClass(ship.is_trained)}">${statusText(ship.is_trained)}</td>
           <td data-label="操作"><div class="row-actions">${actionButtons.join('')}</div></td>
         </tr>`;
       }).join('');
@@ -658,6 +667,10 @@
     }
 
     function recommendSortKey(shipType) {
+      // 自定义舰种（小船）固定排在所有推荐舰种之后，与后端排序保持一致。
+      if (filterOptions.customShipTags.includes(shipType)) {
+        return filterOptions.recommendShipTypes.length + filterOptions.customShipTags.length;
+      }
       const index = filterOptions.recommendShipTypes.indexOf(shipType);
       return index >= 0 ? index : filterOptions.recommendShipTypes.length;
     }
@@ -792,8 +805,8 @@
           <td data-label="是否联动" class="${statusClass(armament.is_collab)}">${armament.is_collab ? '是' : '否'}</td>
           <td data-label="分类">${escapeHtml(armament.group_label)}${armament.is_collab && armament.collab_group ? ` · ${escapeHtml(armament.collab_group)}` : ''}</td>
           <td data-label="实装日期">${escapeHtml(armament.is_collab ? '—' : (armament.release_date || ''))}</td>
-          <td data-label="已打造" class="${statusClass(armament.is_built)}">${statusText(armament.is_built)}</td>
-          <td data-label="已强化" class="${statusClass(armament.is_enhanced)}">${statusText(armament.is_enhanced)}</td>
+          <td data-label="是否已打造" class="${statusClass(armament.is_built)}">${statusText(armament.is_built)}</td>
+          <td data-label="是否已强化" class="${statusClass(armament.is_enhanced)}">${statusText(armament.is_enhanced)}</td>
           <td data-label="操作"><div class="row-actions">${actionButtons.join('')}</div></td>
         </tr>`;
       }).join('');
@@ -1847,6 +1860,7 @@
       filterOptions.bonusShipTypes = options.bonus_ship_types;
       filterOptions.bonusAttributes = options.bonus_attributes;
       filterOptions.recommendShipTypes = options.recommend_ship_types || [];
+      filterOptions.customShipTags = options.custom_ship_tags || [];
       armamentOptions.groups = options.armament_groups || [];
       if (options.version) {
         document.getElementById('versionTag').textContent = 'v' + options.version;

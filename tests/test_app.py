@@ -1759,6 +1759,19 @@ class AppTests(unittest.TestCase):
             self.assertEqual(limits["is_idling"], 3)
             self.assertEqual(limits["is_trained"], 3)
 
+    def test_filter_options_expose_custom_ship_tags_last(self):
+        handler = app.TrackerHandler.__new__(app.TrackerHandler)
+        handler.path = "/api/filter-options"
+        captured = {}
+        handler.send_json = lambda payload: captured.update(payload)
+        handler.do_GET()
+
+        ship_types = captured["ship_types"]
+        # 自定义标签并入舰种筛选项并排在常规舰种之后，顺序与 README 一致。
+        self.assertEqual(ship_types, [*app.SHIP_TYPE_ORDER, *app.CUSTOM_SHIP_TAGS])
+        self.assertEqual(ship_types[-2:], ["小船", "联动"])
+        self.assertEqual(captured["custom_ship_tags"], ["小船", "联动"])
+
     def test_query_filters_supports_plural_ship_types(self):
         from unittest.mock import MagicMock
 
@@ -2014,7 +2027,7 @@ class AppTests(unittest.TestCase):
         self.assertIn(".ships-table td[colspan]", html)
         self.assertIn('.next-table thead { display:none; }', html)
         # 每个数据单元格都带移动端标签，卡片布局才有维度名称。
-        for label in ("舰船名称", "舰种", "稀有度", "获得", "120级", "实装日期", "是否需要练级", "是否已挂机", "已练级", "操作", "挂机目标", "练级目标"):
+        for label in ("舰船名称", "舰种", "稀有度", "获得", "120级", "实装日期", "是否需要练级", "是否已挂机", "是否已练级", "操作", "挂机目标", "练级目标"):
             self.assertIn(f'data-label="{label}"', html)
         self.assertIn('env(safe-area-inset-bottom)', html)
 
@@ -2334,6 +2347,370 @@ class AppTests(unittest.TestCase):
             self.assertEqual(rows["战列"]["idle_count"], option["idle_count"])
             self.assertEqual(rows["战列"]["train_count"], option["train_count"])
 
+    def test_custom_small_ship_tag_filter_and_recommendation(self):
+        """标签“小船”= 无科技点且名称以“小”开头，可筛选、可推荐、排在最后。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                small = app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                # 名称以“小”开头但有科技点的仍属原舰种，不归入小船。
+                trainable = app.insert_ship(
+                    connection,
+                    "小天鹅",
+                    "2024-01-01",
+                    {
+                        "ship_type": "驱逐",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "机动", "points": 0}
+                        ],
+                    },
+                )
+                # 无科技点但名称不以“小”开头的不归入小船。
+                plain = app.insert_ship(
+                    connection,
+                    "企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+
+            self.assertIn("小船", app.CUSTOM_SHIP_TAGS)
+            self.assertEqual(
+                [ship["name"] for ship in app.list_ships({"ship_type": "小船"})],
+                ["小企业"],
+            )
+            # 小天鹅有科技点、企业无“小”前缀，都不在小船内。
+            self.assertEqual(
+                [
+                    ship["name"]
+                    for ship in app.list_ships({"ship_types": ["航母", "小船"]})
+                ],
+                ["企业", "小企业"],
+            )
+            # 推荐候选固定带“需要练级 = 是”，选中小船时不能因此被过滤为空。
+            self.assertEqual(
+                [
+                    ship["name"]
+                    for ship in app.list_ships(
+                        {"ship_type": "小船", "needs_training": "是"}
+                    )
+                ],
+                ["小企业"],
+            )
+            self.assertEqual(
+                sorted(
+                    ship["name"]
+                    for ship in app.list_ships(
+                        {"ship_types": ["驱逐", "小船"], "needs_training": "是"}
+                    )
+                ),
+                sorted(["小天鹅", "小企业"]),
+            )
+            # 未选小船时，“需要练级 = 是”仍然排除无科技点的舰船。
+            self.assertNotIn(
+                "企业",
+                [ship["name"] for ship in app.list_ships({"needs_training": "是"})],
+            )
+
+            # 可配置为推荐舰种，且排序固定在最后。
+            self.assertEqual(
+                app.save_next_ship_types(["航母", "小船"]), ["航母", "小船"]
+            )
+            options = [item["ship_type"] for item in app.available_next_ship_types()]
+            # 标签按声明顺序排在所有舰种之后。
+            self.assertEqual(options[-len(app.CUSTOM_SHIP_TAGS):], app.CUSTOM_SHIP_TAGS)
+            self.assertEqual(options[0], app.RECOMMEND_SHIP_TYPE_ORDER[0])
+
+            rows = app.next_ships_by_type("both", ["驱逐", "小船"])
+            # 有科技点的小天鹅仍归驱逐行，小船行只收小企业，且固定排在最后。
+            self.assertEqual([row["ship_type"] for row in rows], ["驱逐", "小船"])
+            self.assertEqual(
+                [item["ship"]["name"] for item in rows[0]["idle_items"]], ["小天鹅"]
+            )
+            self.assertEqual(rows[1]["idle_count"], 1)
+            self.assertEqual(rows[1]["train_count"], 0)
+            self.assertEqual(
+                [item["ship"]["name"] for item in rows[1]["idle_items"]], ["小企业"]
+            )
+
+            # 兵装列表的舰种筛选同样支持小船；小船没有兵装时结果为空。
+            self.assertEqual(app.list_armaments({"ship_type": "小船"}), [])
+            with app.get_connection() as connection:
+                app.upsert_armament(
+                    connection,
+                    small["id"],
+                    {"release_date": "2024-02-01", "is_collab": False},
+                )
+            self.assertEqual(
+                [item["name"] for item in app.list_armaments({"ship_type": "小船"})],
+                ["小企业"],
+            )
+
+    def test_ship_tags_written_on_sync_and_orthogonal_to_ship_type(self):
+        """标签写入 ships.tags，且与舰种正交：小船既能被标签筛到也能被原舰种筛到。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                # insert_ship 是 Wikidata 同步的写入口，标签在此时落库。
+                app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                app.insert_ship(
+                    connection,
+                    "企业",
+                    "2024-01-01",
+                    {
+                        "ship_type": "航母",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "航空", "points": 0}
+                        ],
+                    },
+                )
+            with app.get_connection() as connection:
+                rows = {
+                    row["name"]: row["tags"]
+                    for row in connection.execute("SELECT name, tags FROM ships")
+                }
+            # 同步时按规则写入；不命中的写成空串，便于重刷后清掉残留。
+            self.assertEqual(rows["小企业"], "小船")
+            self.assertEqual(rows["企业"], "")
+
+            # 与舰种正交：标签筛选和原舰种筛选都能命中同一艘船。
+            self.assertEqual(
+                [ship["name"] for ship in app.list_ships({"ship_type": "小船"})],
+                ["小企业"],
+            )
+            self.assertEqual(
+                [ship["name"] for ship in app.list_ships({"ship_type": "航母"})],
+                ["企业", "小企业"],
+            )
+            # 多个选项取并集，不会因为选中标签而把原舰种排除掉。
+            self.assertEqual(
+                sorted(
+                    ship["name"]
+                    for ship in app.list_ships({"ship_types": ["航母", "小船"]})
+                ),
+                sorted(["企业", "小企业"]),
+            )
+
+            # 接口返回 tags 数组，供前端展示。
+            tagged = app.list_ships({"ship_type": "小船"})[0]
+            self.assertEqual(tagged["tags"], ["小船"])
+            self.assertEqual(app.list_ships({"ship_type": "航母"})[0]["tags"], [])
+
+    def test_placeholder_tag_matches_nothing(self):
+        """“联动”规则尚未实现：占位标签可筛选、可配置，但命中恒为 0。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+            self.assertIn("联动", app.CUSTOM_SHIP_TAGS)
+            # 占位标签没有规则，SQL 条件为 None，筛选结果为空而不是报错。
+            self.assertIsNone(app.ship_tag_condition("联动"))
+            self.assertEqual(app.list_ships({"ship_type": "联动"}), [])
+            # 仍可配置为推荐舰种，只是计数为 0；排序固定在最后。
+            self.assertEqual(app.save_next_ship_types(["联动"]), ["联动"])
+            options = {item["ship_type"]: item for item in app.available_next_ship_types()}
+            self.assertEqual(options["联动"]["idle_count"], 0)
+            self.assertEqual(options["联动"]["train_count"], 0)
+            self.assertEqual(app.next_ships_by_type("both", ["联动"]), [])
+
+    def test_untagged_ships_are_not_matched_by_tag_filter(self):
+        """标签以同步产出的 tags 为准：未重刷的存量数据不会凭空命中标签。
+
+        标签不是从本地字段现算的，因此未同步时筛不到小船，原舰种筛选照常可用。
+        """
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                # 模拟存量行：tags 列刚补上，值为空串。
+                connection.execute(
+                    "UPDATE ships SET tags = '' WHERE id = ?", (ship["id"],)
+                )
+
+            tagged = app.list_ships({"ship_type": "小船"})
+            self.assertEqual(tagged, [])
+            # 舰种筛选不依赖标签，未同步也能正常命中。
+            self.assertEqual(
+                [item["name"] for item in app.list_ships({"ship_type": "航母"})],
+                ["小企业"],
+            )
+            self.assertEqual(app.list_ships({"ship_type": "航母"})[0]["tags"], [])
+            # 推荐侧同样以 tags 为准：未同步时计数为 0，不出候选。
+            options = {
+                item["ship_type"]: item for item in app.available_next_ship_types()
+            }
+            self.assertEqual(options["小船"]["idle_count"], 0)
+            self.assertEqual(app.next_ships_by_type("both", ["小船"]), [])
+
+            # 重刷同步后标签生效。
+            with app.get_connection() as connection:
+                app.refresh_ship_tags(connection)
+            self.assertEqual(
+                [item["name"] for item in app.list_ships({"ship_type": "小船"})],
+                ["小企业"],
+            )
+
+    def test_refresh_ship_tags_backfills_existing_rows(self):
+        """全量同步重刷会补齐 tags，且能清掉不再命中的历史标签。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                connection.execute(
+                    "UPDATE ships SET tags = '联动' WHERE id = ?", (ship["id"],)
+                )
+                updated = app.refresh_ship_tags(connection, ship["id"])
+                row = connection.execute(
+                    "SELECT tags FROM ships WHERE id = ?", (ship["id"],)
+                ).fetchone()
+            self.assertEqual(updated, 1)
+            self.assertEqual(row["tags"], "小船")
+
+    def test_full_sync_backfills_ship_tags(self):
+        """全量同步结束时会重算全部标签，存量数据跑一次即可补齐。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                # 模拟升级前的存量行：tags 列刚补上，值为空串。
+                connection.execute("UPDATE ships SET tags = ''")
+            with patch(
+                "app.wiki.fetch_release_entries",
+                return_value=[{"name": "小企业", "release_date": "2024-01-01"}],
+            ), patch("app.wiki.fetch_armament_entries", return_value=[]):
+                _reset_sync_state()
+                app._sync_wiki()
+            with app.get_connection() as connection:
+                tags = connection.execute(
+                    "SELECT tags FROM ships WHERE name = '小企业'"
+                ).fetchone()["tags"]
+            self.assertEqual(tags, "小船")
+            self.assertEqual(app.SYNC_STATE["errors"], [])
+            _reset_sync_state()
+
+    def test_partial_sync_backfills_only_matched_ships(self):
+        """少量同步只刷新本次同步的舰船标签。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                for name in ("小企业", "小赤城"):
+                    app.insert_ship(
+                        connection,
+                        name,
+                        "2024-01-01",
+                        {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                    )
+                connection.execute("UPDATE ships SET tags = ''")
+            with patch(
+                "app.wiki.fetch_release_entries",
+                return_value=[{"name": "小企业", "release_date": "2024-01-01"}],
+            ), patch("app.wiki.fetch_ship_payload") as payload, patch(
+                "app.wiki.fetch_armament_entries", return_value=[]
+            ):
+                payload.return_value = {
+                    "name": "小企业",
+                    "release_date": "2024-01-01",
+                    "ship_type": "航母",
+                    "rarity": "精锐",
+                    "tech_points": [],
+                }
+                _reset_sync_state()
+                app._sync_wiki(["小企业"])
+            with app.get_connection() as connection:
+                tags = {
+                    row["name"]: row["tags"]
+                    for row in connection.execute("SELECT name, tags FROM ships")
+                }
+            self.assertEqual(tags["小企业"], "小船")
+            # 未参与本次同步的舰船保持原样，留给全量同步处理。
+            self.assertEqual(tags["小赤城"], "")
+            _reset_sync_state()
+
+    def test_tag_filter_reads_tags_column_not_rule(self):
+        """筛选只看 tags 列：手动写入的标签可筛到，规则满足但未写标签的筛不到。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                # 名字带“小”且无科技点，规则满足——但故意不写 tags。
+                no_tag = app.insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                # 名字不以“小”开头，但手动写入 tags，应被筛到。
+                with_tag = app.insert_ship(
+                    connection,
+                    "企业",
+                    "2024-01-01",
+                    {
+                        "ship_type": "航母",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "航空", "points": 0}
+                        ],
+                    },
+                )
+                connection.execute(
+                    "UPDATE ships SET tags = '' WHERE id = ?", (no_tag["id"],)
+                )
+                connection.execute(
+                    "UPDATE ships SET tags = '小船' WHERE id = ?", (with_tag["id"],)
+                )
+
+            self.assertEqual(
+                [item["name"] for item in app.list_ships({"ship_type": "小船"})],
+                ["企业"],
+            )
+            # 舰种筛选与标签互不影响：企业仍是航母，小企业也仍是航母。
+            self.assertEqual(
+                sorted(
+                    item["name"] for item in app.list_ships({"ship_type": "航母"})
+                ),
+                sorted(["企业", "小企业"]),
+            )
+
+    def test_tag_match_is_not_substring(self):
+        """标签按 `/` 分隔成员精确匹配，避免子串误命中。"""
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                ship = app.insert_ship(
+                    connection,
+                    "测试舰",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                # 写入一个包含“小船”子串但不等于“小船”的标签。
+                connection.execute(
+                    "UPDATE ships SET tags = '小小船' WHERE id = ?", (ship["id"],)
+                )
+            self.assertEqual(app.list_ships({"ship_type": "小船"}), [])
+            connection_tags = app.list_ships({"ship_type": "航母"})[0]["tags"]
+            self.assertEqual(connection_tags, ["小小船"])
+
     def test_init_db_migration_is_atomic(self):
         from unittest.mock import patch
 
@@ -2521,6 +2898,22 @@ ARMAMENT_PAGE_HTML = """
 <dl><dd>（联动兵装为活动赠送，无需属性改装）</dd></dl>
 </div>
 """
+
+
+def _reset_sync_state() -> None:
+    """_sync_wiki 直接调用时不会重置计数，测试前后需要自己清理，避免污染其他用例。"""
+    app.SYNC_STATE.update(
+        {
+            "running": False,
+            "status": "未开始",
+            "message": "",
+            "total": 0,
+            "processed": 0,
+            "skipped": 0,
+            "armaments": 0,
+            "errors": [],
+        }
+    )
 
 
 def _insert_ship_with_armament(connection, name, ship_type, rarity, entry):
@@ -3065,7 +3458,7 @@ class ArmamentTests(unittest.TestCase):
         self.assertLess(built, enhanced)
         self.assertLess(enhanced, clear)
         self.assertLess(clear, delete)
-        for label in ("是否联动", "已打造", "已强化", "打造目标", "强化目标"):
+        for label in ("是否联动", "是否已打造", "是否已强化", "打造目标", "强化目标"):
             self.assertIn(f'data-label="{label}"', html)
         # 推荐表格的类型列展示当前待办数量。
         self.assertIn("待挂机${idle} / 待练级${train}", html)
