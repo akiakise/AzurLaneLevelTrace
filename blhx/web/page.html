@@ -47,6 +47,9 @@
     .next-table th, .next-table td { border-bottom:1px solid var(--line); padding:12px 10px; vertical-align:top; }
     .next-table th { background:#172136; color:var(--muted); font-size:12px; }
     .next-ship-name { font-size:17px; font-weight:700; }
+    /* 舰船名称统一跳转 Wiki：继承所在位置的文字样式，悬停才显示可点击。 */
+    .wiki-link { color:inherit; text-decoration:none; }
+    .wiki-link:hover { color:var(--blue); text-decoration:underline; }
     .next-ship-meta { color:var(--muted); font-size:12px; margin:5px 0 10px; }
     .next-ship-actions { display:flex; flex-wrap:wrap; gap:6px; }
     .next-ship-actions button { padding:6px 10px; font-size:12px; }
@@ -438,6 +441,10 @@
       .replace(/'/g, '&#39;');
     const statusClass = value => value === true ? 'yes' : value === false ? 'no' : 'empty';
     const statusText = value => value === true ? '是' : value === false ? '否' : '';
+    // 舰船名称统一跳转 Wiki；地址缺失时退回纯文本，避免渲染出空的 href。
+    const wikiLink = (url, name) => url
+      ? `<a class="wiki-link" href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(name)}</a>`
+      : escapeHtml(name);
 
     const pageLoads = new Map();
     let progressLoading = false;
@@ -617,7 +624,7 @@
         }
         actionButtons.push(`<button type="button" class="danger" data-delete data-id="${escapeAttr(ship.id)}" data-name="${escapeAttr(ship.name)}">删除</button>`);
         return `<tr>
-          <td data-label="舰船名称"><a href="${escapeAttr(ship.wiki_url)}" target="_blank" style="color:#e6edf7;">${escapeHtml(ship.name)}</a></td>
+          <td data-label="舰船名称">${wikiLink(ship.wiki_url, ship.name)}</td>
           <td data-label="舰种">${escapeHtml(ship.ship_type || '')}</td>
           <td data-label="稀有度">${escapeHtml(ship.rarity || '')}</td>
           <td data-label="获得">${escapeHtml(stageTech('解锁图鉴'))}</td>
@@ -679,7 +686,7 @@
         : '';
       return `
         <div class="next-target-item">
-          <div class="next-ship-name">${escapeHtml(ship.name)}${manualBadge}</div>
+          <div class="next-ship-name">${wikiLink(ship.wiki_url, ship.name)}${manualBadge}</div>
           <div class="next-ship-meta">${escapeHtml(ship.rarity || '')} · ${escapeHtml(recommendationTech(ship) || '无加成属性')}</div>
           <div class="next-ship-actions">
             ${item.manual ? `<button type="button"
@@ -779,7 +786,7 @@
         }
         actionButtons.push(`<button type="button" class="danger" data-armament-delete data-id="${escapeAttr(armament.id)}" data-name="${escapeAttr(armament.name)}">删除</button>`);
         return `<tr>
-          <td data-label="舰船名称">${escapeHtml(armament.name)}</td>
+          <td data-label="舰船名称">${wikiLink(armament.wiki_url, armament.name)}</td>
           <td data-label="舰种">${escapeHtml(armament.ship_type || '')}</td>
           <td data-label="稀有度">${escapeHtml(armament.rarity || '')}</td>
           <td data-label="是否联动" class="${statusClass(armament.is_collab)}">${armament.is_collab ? '是' : '否'}</td>
@@ -856,7 +863,7 @@
         : (armament.release_date || '');
       return `
         <div class="next-target-item">
-          <div class="next-ship-name">${escapeHtml(armament.name)}${manualBadge}</div>
+          <div class="next-ship-name">${wikiLink(armament.wiki_url, armament.name)}${manualBadge}</div>
           <div class="next-ship-meta">${escapeHtml(armament.rarity || '')} · ${escapeHtml(armament.ship_type || '')} · ${escapeHtml(dateText)}</div>
           <div class="next-ship-actions">
             ${item.manual ? `<button type="button"

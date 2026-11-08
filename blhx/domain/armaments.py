@@ -22,11 +22,11 @@ ARMAMENT_PENDING_CONDITION = (
 )
 
 
-# 兵装查询统一联表 ships，名称、舰种、稀有度都以舰船表为准。
+# 兵装查询统一联表 ships，名称、舰种、稀有度与 Wiki 地址都以舰船表为准。
 ARMAMENT_SELECT = """
     SELECT a.id, a.ship_id, a.release_date, a.is_collab, a.collab_group,
            a.collab_order, a.is_built, a.is_enhanced,
-           s.name, s.ship_type, s.rarity
+           s.name, s.ship_type, s.rarity, s.wiki_url
     FROM armaments a
     JOIN ships s ON s.id = a.ship_id
 """
@@ -50,6 +50,8 @@ def armament_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "is_enhanced": (
             None if row["is_enhanced"] is None else bool(row["is_enhanced"])
         ),
+        # 兵装列表与兵装推荐的舰船名称都跳转 Wiki，地址统一取舰船表。
+        "wiki_url": row["wiki_url"],
     }
 
 

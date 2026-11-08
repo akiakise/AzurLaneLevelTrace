@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 
 import app
 from support import isolated_app_data
@@ -3071,6 +3072,74 @@ class ArmamentTests(unittest.TestCase):
         self.assertIn("待打造${built} / 待强化${enhanced}", html)        # 推荐顺序（常规在前）与筛选项顺序（是/否）互不影响。
         self.assertEqual(app.ARMAMENT_RECOMMEND_GROUP_ORDER, ["normal", "collab"])
         self.assertEqual(app.ARMAMENT_GROUP_ORDER, ["collab", "normal"])
+
+    def test_armament_rows_and_recommendations_expose_wiki_url(self):
+        with isolated_app_data():
+            with app.get_connection() as connection:
+                _, normal_id = _insert_ship_with_armament(
+                    connection,
+                    "拉菲",
+                    "驱逐",
+                    "精锐",
+                    {"release_date": "2022-06-09", "is_collab": False},
+                )
+                _, collab_id = _insert_ship_with_armament(
+                    connection,
+                    "环",
+                    "重巡",
+                    "超稀有",
+                    {
+                        "release_date": "",
+                        "is_collab": True,
+                        "collab_group": "DOA联动复刻",
+                        "collab_order": 1,
+                    },
+                )
+
+            armaments = {row["id"]: row for row in app.list_armaments({})}
+            # 兵装名称取自舰船，Wiki 地址同样复用舰船表记录。
+            self.assertEqual(
+                armaments[normal_id]["wiki_url"],
+                f"{app.WIKI_BASE_URL}/blhx/{quote('拉菲', safe='')}",
+            )
+            self.assertEqual(
+                armaments[collab_id]["wiki_url"],
+                f"{app.WIKI_BASE_URL}/blhx/{quote('环', safe='')}",
+            )
+            # 单条查询与推荐结果使用同一份字段。
+            self.assertEqual(
+                app.find_armament_brief(normal_id)["wiki_url"],
+                armaments[normal_id]["wiki_url"],
+            )
+            rows = {row["group"]: row for row in app.next_armaments_by_group("both")}
+            for group, field in (("normal", "built_items"), ("collab", "built_items")):
+                item = rows[group][field][0]["armament"]
+                self.assertEqual(
+                    item["wiki_url"], armaments[item["id"]]["wiki_url"]
+                )
+
+    def test_ship_and_armament_names_link_to_wiki(self):
+        html = app.PAGE_HTML
+        # 舰船列表、舰船推荐、兵装列表、兵装推荐四处名称都渲染成 Wiki 链接。
+        self.assertIn("const wikiLink = (url, name) =>", html)
+        self.assertIn(
+            '<td data-label="舰船名称">${wikiLink(ship.wiki_url, ship.name)}</td>',
+            html,
+        )
+        self.assertIn(
+            '<div class="next-ship-name">${wikiLink(ship.wiki_url, ship.name)}',
+            html,
+        )
+        self.assertIn(
+            '<td data-label="舰船名称">${wikiLink(armament.wiki_url, armament.name)}</td>',
+            html,
+        )
+        self.assertIn(
+            '<div class="next-ship-name">${wikiLink(armament.wiki_url, armament.name)}',
+            html,
+        )
+        self.assertIn('target="_blank" rel="noopener"', html)
+        self.assertIn(".wiki-link", html)
 
 
 if __name__ == "__main__":
