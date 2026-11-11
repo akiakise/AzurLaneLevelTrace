@@ -112,7 +112,6 @@ class TrackerHandler(BaseHTTPRequestHandler):
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         keys = [
             "name",
-            "ship_type",
             "rarity",
             "bonus_ship_type",
             "bonus_attribute",
@@ -124,37 +123,31 @@ class TrackerHandler(BaseHTTPRequestHandler):
         filters: dict[str, Any] = {
             key: query.get(key, [""])[0].strip() for key in keys
         }
-        # 与 /api/next-group 统一：ship_types 复数参数优先，支持列出多个舰种。
+        # 与 /api/next-group 统一：ship_types 支持列出多个舰种。
         ship_types = [
             value.strip()
             for value in query.get("ship_types", [])
             if value.strip()
         ]
-        if not ship_types and filters["ship_type"]:
-            ship_types = [filters["ship_type"]]
         if ship_types:
             filters["ship_types"] = ship_types
         return filters
 
     def query_armament_filters(self) -> dict[str, Any]:
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
-        keys = ["name", "ship_type", "rarity", "group", "is_collab",
-                "is_built", "is_enhanced", "pending"]
+        keys = ["name", "ship_type", "rarity", "group", "is_built",
+                "is_enhanced", "pending"]
         return {
             key: query.get(key, [""])[0].strip() for key in keys
         }
 
     def next_query_ship_types(self) -> list[str]:
         query = parse_qs(urlsplit(self.path).query)
-        ship_type = query.get("ship_type", [""])[0]
-        ship_types = [
+        return [
             value.strip()
             for value in query.get("ship_types", [])
             if value.strip()
         ]
-        if not ship_types and ship_type:
-            ship_types = [ship_type.strip()]
-        return ship_types
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path

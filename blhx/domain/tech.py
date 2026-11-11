@@ -34,15 +34,3 @@ def parse_tech_attribute(value: str) -> tuple[list[str], str]:
     if not separator:
         return [], attribute_from_text(text)
     return split_bonus_ship_types(type_part), attribute_from_text(attribute_part)
-
-
-def tech_attribute_matches(
-    attribute: str,
-    ship_type: str,
-    tech_attribute: str,
-    fallback_ship_type: str = "",
-) -> bool:
-    attribute_ship_types, attribute_name = parse_tech_attribute(attribute)
-    if not attribute_ship_types and fallback_ship_type:
-        attribute_ship_types = [normalize_ship_type(fallback_ship_type)]
-    return normalize_ship_type(ship_type) in attribute_ship_types and attribute_name == tech_attribute

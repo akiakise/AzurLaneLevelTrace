@@ -135,11 +135,6 @@ def _build_armament_conditions(
     if group in ARMAMENT_GROUP_FLAGS:
         conditions.append("a.is_collab = ?")
         parameters.append(ARMAMENT_GROUP_FLAGS[group])
-    # 兵装只有“是否联动”一个维度，is_collab=是/否 与 group 等价，两条入口都支持。
-    is_collab = str(filters.get("is_collab") or "").strip()
-    if is_collab in {"是", "否"}:
-        conditions.append("a.is_collab = ?")
-        parameters.append(1 if is_collab == "是" else 0)
     for field in ARMAMENT_STATUS_FIELDS:
         value = str(filters.get(field) or "").strip()
         if value == "是":

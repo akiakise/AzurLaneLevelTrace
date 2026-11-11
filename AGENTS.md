@@ -6,8 +6,8 @@
 
 - **正式配置**：`DATA_DIR/config.json`，默认 `/Users/liuqi/Workspace/akise/AzurLaneLevelTrace/data/config.json`，保存 `next_ship_types`（推荐舰种）、`target_limits`（每舰种挂机/练级目标数量上限，1–10）、`manual_targets`（手动录入舰娘 ID 列表，不超过对应上限）、`armament_target_limits`（联动/常规兵装打造与强化目标数量上限，1–10）和 `armament_manual_targets`（手动录入兵装 ID 列表）。调整任一配置字段时必须带全其余字段一并 `write_config`，否则会被规范化丢弃。
 - **正式数据库**：`DATA_DIR/blhx-training.sqlite3`，默认 `/Users/liuqi/Workspace/akise/AzurLaneLevelTrace/data/blhx-training.sqlite3`，包含 `ships`、`tech_points`、`armaments`、`operation_logs`。
-- **路径来源**：`blhx/core/constants.py` 中 `DATA_DIR`、`DATABASE_PATH`、`CONFIG_PATH`；`DATA_DIR` 可由环境变量覆盖，`DATABASE_PATH` 与 `CONFIG_PATH` 均由 `DATA_DIR` 派生，不单独读环境变量。根级 `blhx/constants.py` 只是兼容转发层。
-- **测试配置与测试数据库**：一律使用进程内临时目录，禁止指向正式 `data/`。测试必须通过 `tests/support.py` 的 `isolated_app_data()` 上下文管理器，它会在临时目录内重建 `blhx-training.sqlite3` 和 `config.json`，并在退出时恢复 `app.db.DATA_DIR`、`app.db.DATABASE_PATH`、`app.config.CONFIG_PATH`。
+- **路径来源**：`blhx/core/constants.py` 中 `DATA_DIR`、`DATABASE_PATH`、`CONFIG_PATH`；`DATA_DIR` 可由环境变量覆盖，`DATABASE_PATH` 与 `CONFIG_PATH` 均由 `DATA_DIR` 派生，不单独读环境变量。
+- **测试配置与测试数据库**：一律使用进程内临时目录，禁止指向正式 `data/`。测试必须通过 `tests/support.py` 的 `isolated_app_data()` 上下文管理器，它会在临时目录内重建 `blhx-training.sqlite3` 和 `config.json`，并在退出时恢复 `blhx.storage.db.DATA_DIR`、`blhx.storage.db.DATABASE_PATH`、`blhx.storage.config.CONFIG_PATH`。
 - **禁止事项**：测试代码不得直接 `sqlite3.connect` 正式库，不得写 `data/`、不得复用正式 `config.json`，不得依赖正式库中的既有数据。
 - **本地手工验证**：需要试跑真实数据时先复制 `data/` 到临时目录，再用 `DATA_DIR=<临时目录> python app.py` 启动；不要直接对正式库做结构试验。
 
@@ -19,7 +19,7 @@
 - `blhx/datasource/`：Wiki 抓取与解析。
 - `blhx/transfer/`：CSV 导入导出与后台导入任务。
 - `blhx/web/`：HTTP 服务、页面与静态资源（`static/icon.png` 以 `/icon.png` 提供）。
-- 根级 `blhx/*.py` 为兼容转发层，新增代码应写入对应子包，不要继续加在根级模块。
+- 根级只保留 `blhx/__init__.py`，所有代码写在对应子包内；不要再新增根级转发模块。
 
 ## “清空数据”功能范围
 

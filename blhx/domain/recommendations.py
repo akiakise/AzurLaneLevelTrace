@@ -28,7 +28,7 @@ def tech_priority_rank(ship: dict[str, Any]) -> int:
             value
             for value in tech_point.get("bonus_ship_type", "").split("/")
             if value
-        ] or [ship["ship_type"]]
+        ]
         for bonus_ship_type in bonus_ship_types:
             priority = TECH_PRIORITY_BY_TYPE.get(
                 bonus_ship_type, DEFAULT_TECH_PRIORITY
@@ -128,12 +128,8 @@ def available_next_ship_types() -> list[dict[str, Any]]:
     )
 
 
-def _normalize_ship_types(
-    ship_type: str,
-    ship_types: list[str] | None,
-) -> list[str]:
-    if ship_types is None:
-        ship_types = [ship_type] if ship_type else []
+def _normalize_ship_types(ship_types: list[str] | None) -> list[str]:
+    ship_types = ship_types or []
     if not isinstance(ship_types, list) or not all(
         isinstance(value, str) for value in ship_types
     ):
@@ -201,12 +197,11 @@ def _sort_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def next_ship(
     mode: str,
-    ship_type: str = "",
     ship_types: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if mode not in {"idle", "train"}:
         raise ValueError("mode 必须是 idle 或 train")
-    ship_types = _normalize_ship_types(ship_type, ship_types)
+    ship_types = _normalize_ship_types(ship_types)
     _validate_ship_types(ship_types)
     filters: dict[str, Any] = {
         "ship_types": ship_types,
@@ -295,7 +290,7 @@ def next_ships_by_type(
 ) -> list[dict[str, Any]]:
     if mode not in {"both", "idle", "train"}:
         raise ValueError("mode 必须是 both、idle 或 train")
-    ship_types = _normalize_ship_types("", ship_types)
+    ship_types = _normalize_ship_types(ship_types)
     # 分组推荐允许传入暂无可练级舰娘的舰种：这类行会在下面被过滤掉。
     manual_targets = manual_targets or {}
     target_limits = target_limits or {}

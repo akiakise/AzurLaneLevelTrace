@@ -25,12 +25,10 @@ class CsvFormatError(ValueError):
 
 
 def decode_csv_text(data: bytes) -> str:
-    for encoding in (CSV_ENCODING, "utf-8", "gb18030"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise CsvFormatError("CSV 文件编码无法识别，请使用 UTF-8 或 GB18030 编码")
+    try:
+        return data.decode(CSV_ENCODING)
+    except UnicodeDecodeError as error:
+        raise CsvFormatError("CSV 文件编码无法识别，请使用 UTF-8 编码") from error
 
 
 def csv_read(data: bytes) -> list[list[str]]:

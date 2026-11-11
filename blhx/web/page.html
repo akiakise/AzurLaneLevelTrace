@@ -582,9 +582,12 @@
     window.addEventListener('hashchange', () => switchTab(tabFromHash()));
 
     async function loadShips() {
-      const params = new URLSearchParams({
-        ...filterState
-      });
+      const params = new URLSearchParams({ ...filterState });
+      // 舰种筛选在后端只认复数参数；选中舰种时改写参数名，避免被忽略。
+      if (filterState.ship_type) {
+        params.delete('ship_type');
+        params.append('ship_types', filterState.ship_type);
+      }
       try {
         const result = await requestJson('/api/ships?' + params.toString());
         shipData = result.ships;

@@ -27,7 +27,7 @@ SQLite 数据库
 
 ```text
 .
-├── app.py                     # 兼容入口与统一导出
+├── app.py                     # 服务启动入口
 ├── bump_version.sh            # 本地版本号升级脚本
 ├── blhx/
 │   ├── __init__.py
@@ -53,7 +53,6 @@ SQLite 数据库
 │   │   ├── page.py            # 前端页面加载
 │   │   ├── page.html          # 前端页面（推荐页面 / 练级列表 / 兵装列表 Tab）
 │   │   └── static/icon.png    # 站点图标
-│   └── <旧模块>.py            # 兼容转发层，转发到上述子包
 ├── tests/
 │   ├── support.py             # 测试数据目录隔离
 │   └── test_app.py            # Wiki 解析、CSV 读写、筛选与导入测试
@@ -96,7 +95,7 @@ SQLite 数据库
 | `bonus_attribute` | 加成属性，例如 `耐久`；用于“加成属性”精确筛选 |
 | `points` | 保留字段，当前不再用于展示和筛选，固定为 `0` |
 
-一艘舰船可以有多条 `tech_points` 记录。若某舰船没有任何有效加成属性，同步时会将 `needs_training` 写为 `否`；否则写为 `是`。`bonus_ship_type` 与 `bonus_attribute` 由 `attribute` 解析写入，是“加成舰种”“加成属性”筛选的依据；旧库缺少这两列时会在启动时重建该表。
+一艘舰船可以有多条 `tech_points` 记录。若某舰船没有任何有效加成属性，同步时会将 `needs_training` 写为 `否`；否则写为 `是`。`bonus_ship_type` 与 `bonus_attribute` 由 `attribute` 解析写入，是“加成舰种”“加成属性”筛选的依据。表结构只在建库时创建一次，不做旧库迁移：表结构不匹配时启动会直接报错，请删库后重新同步。
 
 #### `armaments`
 
@@ -265,8 +264,8 @@ GET  /api/import/result   # 下载导入结果 CSV
 推荐接口：
 
 ```text
-GET /api/next?mode=idle&ship_type=战列
-GET /api/next?mode=train&ship_type=重巡
+GET /api/next?mode=idle&ship_types=战列
+GET /api/next?mode=train&ship_types=重巡
 GET /api/next?mode=train&ship_types=战列&ship_types=重巡
 GET /api/config
 POST /api/config
@@ -429,8 +428,7 @@ GET /api/armaments
 | `name` | 舰船名称模糊查询 |
 | `ship_type` | 舰种精确匹配 |
 | `rarity` | 稀有度精确匹配 |
-| `group` | `collab`（联动）/ `normal`（常规） |
-| `is_collab` | `是` / `否`，与 `group` 等价 |
+| `group` | `collab`（联动）/ `normal`（常规），兵装唯一的类型筛选入口 |
 | `is_built` | `是` / `否` |
 | `is_enhanced` | `是` / `否` |
 | `pending` | `是` 时只返回“未完成”兵装（打造与强化至少一项未完成，`NULL` 与 `0` 都命中），其他取值视为不筛选 |
@@ -450,7 +448,7 @@ GET /api/ships
 | 参数 | 说明 |
 | --- | --- |
 | `name` | 舰船名称模糊查询 |
-| `ship_type` | 舰种精确匹配；风帆M/S/V 均视为 `风帆` |
+| `ship_types` | 舰种精确匹配，可重复传多个；风帆M/S/V 均视为 `风帆` |
 | `rarity` | 稀有度精确匹配 |
 | `bonus_ship_type` | 加成舰种精确匹配，按 `bonus_ship_type` 中的任一项命中 |
 | `bonus_attribute` | 加成属性精确匹配，按 `bonus_attribute` 命中 |
@@ -618,7 +616,7 @@ SQLite 文件位于：
 确认容器内运行的版本：
 
 ```bash
-docker compose exec blhx-training python -c "import app; print(app.APP_VERSION)"
+docker compose exec blhx-training python -c "from blhx.core.version import APP_VERSION; print(APP_VERSION)"
 curl -s http://localhost:8000/api/version
 ```
 
@@ -701,6 +699,6 @@ docker compose up -d
 - 当前应用没有 `requirements.txt`，因为只使用 Python 标准库。
 - 测试必须使用 `tests/support.py` 的 `isolated_app_data()` 隔离数据目录，禁止读写正式 `data/` 目录。
 - 修改 Wiki 解析逻辑时，优先补充或调整 `tests/test_app.py` 中的样例数据。
-- 修改 CSV 逻辑时，注意保持模板列名完全一致；文件使用 UTF-8 BOM 编码，导入时同时兼容 UTF-8 与 GB18030。
+- 修改 CSV 逻辑时，注意保持模板列名完全一致；文件使用 UTF-8 BOM 编码；导入只接受 UTF-8（含 BOM），其他编码直接报错。
 - SQLite 文件和运行数据目录不要提交到 Git。
 - `.gitignore` 已覆盖 Python 缓存、虚拟环境、测试缓存、SQLite 数据、日志和常见本地产物。

@@ -217,7 +217,7 @@ def delete_ship(ship_id: int) -> bool:
         ).fetchone()
         if ship is None:
             return False
-        # 兵装随舰船一起删除；外键级联之外再显式删除一层，兼容旧库。
+        # 兵装随舰船一起删除；外键级联之外再显式删除一层。
         connection.execute("DELETE FROM armaments WHERE ship_id = ?", (ship_id,))
         cursor = connection.execute(
             "DELETE FROM ships WHERE id = ?", (ship_id,)
@@ -248,7 +248,6 @@ def clear_ships() -> int:
             count = connection.execute("SELECT COUNT(*) FROM ships").fetchone()[0]
             connection.execute("DELETE FROM ships")
             connection.execute("DELETE FROM tech_points")
-            # 兵装表虽然有 ON DELETE CASCADE，仍显式删除，避免旧库缺外键约束时残留。
             connection.execute("DELETE FROM armaments")
             connection.execute("DELETE FROM operation_logs")
             has_sequence_table = connection.execute(
@@ -280,10 +279,7 @@ def _build_ship_conditions(
     parameters: list[Any] = []
     ship_type_filters = [
         normalize_ship_type(value.strip())
-        for value in (
-            filters.get("ship_types")
-            or ([filters["ship_type"]] if filters.get("ship_type") else [])
-        )
+        for value in (filters.get("ship_types") or [])
         if isinstance(value, str) and value.strip()
     ]
     bonus_ship_type_filter = normalize_ship_type(
