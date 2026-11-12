@@ -558,7 +558,7 @@ def _release_completed_manual_targets(ship_id: int, read_config, write_config) -
         for key, value in config["manual_targets"].items()
     }
     changed = False
-    for ship_type, targets in list(manual_targets.items()):
+    for entry_key, targets in list(manual_targets.items()):
         for target_field in completed_fields:
             ids = targets.get(target_field)
             if ids and ship_id in ids:
@@ -567,7 +567,7 @@ def _release_completed_manual_targets(ship_id: int, read_config, write_config) -
                 if not targets[target_field]:
                     targets.pop(target_field, None)
         if not targets:
-            manual_targets.pop(ship_type, None)
+            manual_targets.pop(entry_key, None)
     if changed:
         write_config(
             {
@@ -601,7 +601,7 @@ def _release_manual_target_locked(
     }
     fields = [field] if field else ["is_idling", "is_trained"]
     changed = False
-    for ship_type, targets in list(manual_targets.items()):
+    for entry_key, targets in list(manual_targets.items()):
         for target_field in fields:
             ids = targets.get(target_field)
             if ids and ship_id in ids:
@@ -610,7 +610,7 @@ def _release_manual_target_locked(
                 if not targets[target_field]:
                     targets.pop(target_field, None)
         if not targets:
-            manual_targets.pop(ship_type, None)
+            manual_targets.pop(entry_key, None)
     if changed:
         write_config(
             {

@@ -118,14 +118,14 @@ export function createHarness() {
   const source = `${script}\nreturn {
     requestJson, renderShips, recommendationItem, completeShipStatus, clearShipStatus,
     togglePickerShip, changeTargetLimit, removeManualTarget, clearShipPickerTarget,
-    deleteShip, confirmClearShips, toggleNextType, startSync, importCsv,
+    deleteShip, confirmClearShips, toggleNextShipType, startSync, importCsv,
     refreshSyncStatus, refreshImportStatus, downloadImportResult,
     completeArmamentStatus, clearArmamentStatus, deleteArmamentById,
     changeArmamentTargetLimit, togglePickerArmament, removeArmamentManualTarget,
     clearArmamentPickerTarget, openArmamentPicker, loadArmamentNextTargets,
-    switchTab, tabFromHash,
+    switchTab, tabFromHash, openShipTypePicker,
     seed() {
-      nextTypeConfig = ['重巡'];
+      nextShipTypes = ['重巡'];
       pickerState = { kind: 'ship', shipType: '重巡', group: '', field: 'is_idling', keyword: '', timer: null };
       armamentTargetLimits = {
         collab: { is_built: 1, is_enhanced: 1 },
@@ -163,7 +163,7 @@ export function createHarness() {
       const payload = request.url.startsWith('/api/ships?') ? { ships: [] }
         : request.url.startsWith('/api/armaments?') ? { armaments: [], status_counts: {} }
           : request.url === '/api/config' ? config
-            : request.url === '/api/next-options' ? { ship_types: [{ ship_type: '重巡', idle_count: 1, train_count: 1 }] }
+            : request.url === '/api/next-options' ? { ship_types: [{ ship_type: '重巡', has_priority_table: true, priority: ['机动', '炮击', '装填', '命中', '雷击', '防空', '耐久'], idle_count: 1, train_count: 1 }] }
               : request.url.startsWith('/api/next-group?') ? { rows: [] }
                 : request.url.startsWith('/api/armament-next-group?') ? { rows: [] }
                   : assert.fail(`未定义响应：${request.url}`);

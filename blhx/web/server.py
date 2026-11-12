@@ -37,7 +37,11 @@ from ..transfer.csv_io import (
 )
 from ..storage.history import list_operations
 from .page import PAGE_HTML, STATIC_DIR
-from ..domain.recommendations import available_next_ship_types, next_ship, next_ships_by_type
+from ..domain.recommendations import (
+    available_next_ship_types,
+    next_ship,
+    next_ships_by_type,
+)
 from ..domain.armaments import (
     clear_armament_statuses,
     count_pending_armament_statuses,
@@ -229,14 +233,14 @@ class TrackerHandler(BaseHTTPRequestHandler):
                 query = parse_qs(urlsplit(self.path).query)
                 mode = query.get("mode", ["both"])[0]
                 config = read_config()
-                ship_types = (
+                keys = (
                     self.next_query_ship_types() or config["next_ship_types"]
                 )
                 self.send_json(
                     {
                         "rows": next_ships_by_type(
                             mode,
-                            ship_types,
+                            keys,
                             config["manual_targets"],
                             config["target_limits"],
                         )
@@ -302,13 +306,13 @@ class TrackerHandler(BaseHTTPRequestHandler):
                     self.send_json({"started": False, "message": "同步正在进行中"})
             elif path == "/api/config":
                 payload = self.read_json()
-                ship_types = save_next_ship_types(
+                keys = save_next_ship_types(
                     payload.get("next_ship_types", [])
                 )
                 config = read_config()
                 self.send_json(
                     {
-                        "next_ship_types": ship_types,
+                        "next_ship_types": keys,
                         "target_limits": config["target_limits"],
                         "manual_targets": config["manual_targets"],
                     }

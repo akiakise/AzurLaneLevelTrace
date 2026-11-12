@@ -18,6 +18,10 @@ from blhx.storage.config import (
     write_config,
 )
 from blhx.core.constants import (
+    DEFAULT_TECH_PRIORITY,
+    RECOMMEND_TECH_SHIP_TYPES,
+    ship_tech_priority_score,
+    tech_priority_order,
     ARMAMENT_GROUP_ORDER,
     ARMAMENT_RECOMMEND_GROUP_ORDER,
     BASE_DIR,
@@ -61,7 +65,7 @@ from blhx.domain.recommendations import (
     available_next_ship_types,
     next_ship,
     next_ships_by_type,
-    tech_priority_rank,
+    ship_bonus_ship_types,
 )
 from blhx.web.server import (
     TrackerHandler,
@@ -110,6 +114,15 @@ from blhx.datasource.wiki import (
     parse_ship_raw,
     parse_template_fields,
 )
+
+
+def tech_point(ship_type, attribute=""):
+    """推荐粒度是加成舰种，配置键就是舰种名。
+
+    保留第二参数只为让既有用例读起来仍然表达“某舰种的某个属性”，
+    实际比较与传参一律使用舰种名。
+    """
+    return ship_type
 
 
 def _default_armament_limits():
@@ -668,7 +681,7 @@ class AppTests(unittest.TestCase):
                         "ship_type": "重巡",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "机动", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "驱逐 机动", "points": 0}
                         ],
                     },
                 )
@@ -882,34 +895,15 @@ class AppTests(unittest.TestCase):
             self.assertEqual([ship["name"] for ship in ships], ["重樱专属"])
 
     def test_next_ship_type_config_uses_data_file(self):
-        with isolated_app_data() as temp_dir:
-            with get_connection() as connection:
-                insert_ship(
-                    connection,
-                    "武藏",
-                    "2023-08-17",
-                    {
-                        "ship_type": "战列",
-                        "rarity": "海上传奇",
-                        "tech_points": [
-                            {
-                                "stage": "解锁图鉴",
-                                "attribute": "战巡/战列/航战 耐久",
-                                "points": 0,
-                            }
-                        ],
-                    },
-                )
-
+        """推荐舰种（加成舰种）落盘到 DATA_DIR/config.json。"""
+        with isolated_app_data():
             saved = save_next_ship_types(["战列"])
             self.assertEqual(saved, ["战列"])
             self.assertEqual(
                 read_config(),
                 {
                     "next_ship_types": ["战列"],
-                    "target_limits": {
-                        "战列": {"is_idling": 1, "is_trained": 1}
-                    },
+                    "target_limits": {"战列": {"is_idling": 1, "is_trained": 1}},
                     "manual_targets": {},
                     "armament_target_limits": _default_armament_limits(),
                     "armament_manual_targets": {},
@@ -922,41 +916,23 @@ class AppTests(unittest.TestCase):
                     json.load(file),
                     {
                         "next_ship_types": ["战列"],
-                        "target_limits": {
-                            "战列": {"is_idling": 1, "is_trained": 1}
-                        },
+                        "target_limits": {"战列": {"is_idling": 1, "is_trained": 1}},
                         "manual_targets": {},
                         "armament_target_limits": _default_armament_limits(),
                         "armament_manual_targets": {},
                     },
                 )
-            # 推荐舰种与舰船现状解绑：库里没有驱逐舰也能配置驱逐。
-            saved = save_next_ship_types(["战列", "驱逐"])
-            self.assertEqual(saved, ["战列", "驱逐"])
-            self.assertEqual(
-                read_config()["next_ship_types"], ["战列", "驱逐"]
-            )
-            # 非法舰种仍然拒绝。
+            # 多个舰种按 BONUS_SHIP_TYPE_ORDER 落盘，重复项去重。
+            saved = save_next_ship_types(["战列", "驱逐", "战列"])
+            self.assertEqual(saved, ["驱逐", "战列"])
+            self.assertEqual(read_config()["next_ship_types"], ["驱逐", "战列"])
+            # 不在推荐范围内的舰种（如舰船自身舰种「航母」）被拒绝。
             with self.assertRaises(ValueError):
-                save_next_ship_types(["战列", "不存在舰种"])
+                save_next_ship_types(["航母"])
 
     def test_recommend_config_survives_until_ship_appears(self):
-        """配置先于舰船存在：空库可配置，后续出现可练级舰船后自动参与推荐。"""
+        """配置先于数据存在：配置可保存，后续出现对应科技点的舰船后自动参与推荐。"""
         with isolated_app_data():
-            # 空库状态下即可配置推荐舰种，不受“必须有可练级舰娘”限制。
-            self.assertEqual(
-                save_next_ship_types(["重巡", "驱逐"]), ["重巡", "驱逐"]
-            )
-            self.assertEqual(
-                read_config()["next_ship_types"], ["重巡", "驱逐"]
-            )
-            # 配置保留：此时两个舰种计数都是 0，分组推荐返回空行。
-            options = {item["ship_type"]: item for item in available_next_ship_types()}
-            self.assertEqual(options["重巡"]["idle_count"], 0)
-            self.assertEqual(options["重巡"]["train_count"], 0)
-            self.assertEqual(next_ships_by_type("both", ["重巡", "驱逐"]), [])
-
-            # 后续同步/导入出新的可练级舰船，既有配置无需改动即自动生效。
             with get_connection() as connection:
                 insert_ship(
                     connection,
@@ -974,15 +950,17 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            config = read_config()
-            self.assertEqual(config["next_ship_types"], ["重巡", "驱逐"])
+            key = tech_point("重巡", "机动")
+            self.assertEqual(save_next_ship_types([key]), [key])
+            self.assertEqual(read_config()["next_ship_types"], [key])
+
             rows = next_ships_by_type(
                 "both",
-                config["next_ship_types"],
-                config["manual_targets"],
-                config["target_limits"],
+                read_config()["next_ship_types"],
+                read_config()["manual_targets"],
+                read_config()["target_limits"],
             )
-            self.assertEqual([row["ship_type"] for row in rows], ["重巡"])
+            self.assertEqual([row["ship_type"] for row in rows], [key])
             self.assertEqual(rows[0]["idle"]["name"], "古鹰")
             self.assertTrue(rows[0]["idle_manual_stale"] is False)
 
@@ -990,9 +968,7 @@ class AppTests(unittest.TestCase):
             update_ship_status(
                 list_ships({"name": "古鹰"})[0]["id"], "is_trained", True
             )
-            self.assertEqual(
-                read_config()["next_ship_types"], ["重巡", "驱逐"]
-            )
+            self.assertEqual(read_config()["next_ship_types"], [key])
 
     def test_next_ship_supports_available_ship_types(self):
         with isolated_app_data():
@@ -1055,55 +1031,66 @@ class AppTests(unittest.TestCase):
             )
 
             options = {item["ship_type"]: item for item in available_next_ship_types()}
-            # 选项以舰种常量全集为准，没有可练级舰娘的舰种也保留，计数为 0。
-            self.assertEqual(
-                options["战列"], {"ship_type": "战列", "idle_count": 1, "train_count": 0}
-            )
-            self.assertEqual(
-                options["重巡"], {"ship_type": "重巡", "idle_count": 1, "train_count": 0}
-            )
-            self.assertEqual(
-                options["驱逐"], {"ship_type": "驱逐", "idle_count": 0, "train_count": 0}
-            )
+            # 选项来自全部加成舰种，计数与待办口径一致。
+            self.assertEqual(options[tech_point("战列", "耐久")]["idle_count"], 1)
+            self.assertEqual(options[tech_point("战列", "耐久")]["train_count"], 0)
+            self.assertEqual(options["重巡"]["idle_count"], 1)
+            # 已练级的驱逐不再计入待练级。
+            self.assertEqual(options[tech_point("驱逐", "炮击")]["idle_count"], 0)
             self.assertIsNone(
-                next_ship("train", ship_types=["战列", "重巡"])
+                next_ship(
+                    "train",
+                    ship_types=[
+                        tech_point("战列", "耐久"),
+                        tech_point("重巡", "机动"),
+                    ],
+                )
             )
             self.assertEqual(
-                next_ship("idle", ship_types=["重巡"])["name"], "古鹰"
+                next_ship("idle", ship_types=[tech_point("重巡", "机动")])["name"],
+                "古鹰",
             )
 
             update_ship_status(battle_ship["id"], "is_idling", True)
             update_ship_status(heavy_cruiser["id"], "is_idling", True)
             options = {item["ship_type"]: item for item in available_next_ship_types()}
-            self.assertEqual(
-                options["战列"], {"ship_type": "战列", "idle_count": 0, "train_count": 1}
-            )
-            self.assertEqual(
-                options["重巡"], {"ship_type": "重巡", "idle_count": 0, "train_count": 1}
-            )
+            self.assertEqual(options["战列"]["train_count"], 1)
+            self.assertEqual(options["重巡"]["train_count"], 1)
             ships = list_ships({"ship_types": ["战列", "重巡"]})
             self.assertEqual(
                 [ship["name"] for ship in ships], ["古鹰", "武藏"]
             )
             self.assertEqual(
-                next_ship("train", ship_types=["战列", "重巡"])["name"],
+                next_ship(
+                    "train",
+                    ship_types=[
+                        tech_point("战列", "耐久"),
+                        tech_point("重巡", "机动"),
+                    ],
+                )["name"],
                 "古鹰",
             )
-            self.assertIsNone(next_ship("idle", ship_types=["重巡"]))
-            grouped = next_ships_by_type("both", ["战列", "重巡"])
+            self.assertIsNone(
+                next_ship("idle", ship_types=[tech_point("重巡", "机动")])
+            )
+            grouped = next_ships_by_type(
+                "both",
+                [tech_point("重巡", "机动"), tech_point("战列", "耐久")],
+            )
+            # 行顺序由 BONUS_SHIP_TYPE_ORDER 决定：重巡在战列之前。
             self.assertEqual(
-                [row["ship_type"] for row in grouped], ["战列", "重巡"]
+                [row["ship_type"] for row in grouped], ["重巡", "战列"]
             )
             self.assertIsNone(grouped[0]["idle"])
-            self.assertEqual(grouped[0]["train"]["name"], "武藏")
+            self.assertEqual(grouped[0]["train"]["name"], "古鹰")
             self.assertIsNone(grouped[1]["idle"])
-            self.assertEqual(grouped[1]["train"]["name"], "古鹰")
-            with self.assertRaises(ValueError):
-                next_ship("train", ship_types=["战列", "驱逐"])
+            self.assertEqual(grouped[1]["train"]["name"], "武藏")
 
             update_ship_status(heavy_cruiser["id"], "is_trained", True)
-            with self.assertRaises(ValueError):
-                next_ship("train", ship_types=["重巡"])
+            # 没有可推荐舰娘时返回 None，不再抛“舰种不可用”错误。
+            self.assertIsNone(
+                next_ship("train", ship_types=[tech_point("重巡", "机动")])
+            )
 
     def test_operation_history_records_status_and_delete(self):
         with isolated_app_data():
@@ -1349,50 +1336,81 @@ class AppTests(unittest.TestCase):
                 list_ships({"bonus_ship_type": "航母"}), []
             )
 
-    def test_tech_priority_uses_bonus_ship_type(self):
+    def test_shop_tech_point_keys(self):
+        """舰船的科技点键按「加成舰种 + 加成属性」展开，多值舰种逐个拆分。"""
         with isolated_app_data():
             with get_connection() as connection:
                 insert_ship(
                     connection,
+                    "什罗普郡",
+                    "2024-01-01",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡/重炮/超巡 装填", "points": 0},
+                            {"stage": "达到120级", "attribute": "重巡/重炮/超巡 机动", "points": 0},
+                        ],
+                    },
+                )
+            ship = list_ships({"name": "什罗普郡"})[0]
+            # 加成舰种按舰种去重：多个属性归到同一舰种下。
+            self.assertEqual(
+                ship_bonus_ship_types(ship), ["重巡", "重炮", "超巡"]
+            )
+            # 没有科技点的舰船返回空列表。
+            with get_connection() as connection:
+                insert_ship(
+                    connection,
                     "企业",
-                    "2020-01-01",
-                    {
-                        "ship_type": "航母",
-                        "rarity": "海上传奇",
-                        "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "轻航/正航 装填", "points": 0}
-                        ],
-                    },
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
                 )
-                light_carrier = insert_ship(
-                    connection,
-                    "兰利",
-                    "2021-01-01",
-                    {
-                        "ship_type": "轻航",
-                        "rarity": "精锐",
-                        "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "轻航/正航 装填", "points": 0}
-                        ],
-                    },
-                )
-                other = insert_ship(
-                    connection,
-                    "重樱",
-                    "2022-01-01",
-                    {
-                        "ship_type": "战列",
-                        "rarity": "精锐",
-                        "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "战巡/战列/航战 耐久", "points": 0}
-                        ],
-                    },
-                )
-            ships = {ship["name"]: ship for ship in list_ships({})}
-            self.assertEqual(tech_priority_rank(ships["企业"]), 0)
-            self.assertEqual(tech_priority_rank(ships["兰利"]), 0)
-            self.assertGreater(tech_priority_rank(ships["重樱"]), 0)
-            self.assertEqual(light_carrier["ship_type"], "轻航")
+            self.assertEqual(
+                ship_bonus_ship_types(list_ships({"name": "企业"})[0]), []
+            )
+
+    def test_tech_priority_order_covers_every_ship_type(self):
+        """有表舰种返回自己的表；无表舰种统一回退到 DEFAULT_TECH_PRIORITY。"""
+        for ship_type, expected in [
+            ("战列", ["装填", "命中", "炮击", "防空", "耐久"]),
+            ("重巡", ["机动", "炮击", "装填", "命中", "雷击", "防空", "耐久"]),
+            ("潜艇", ["雷击"]),
+        ]:
+            self.assertEqual(tech_priority_order(ship_type), expected)
+        # 战巡/超巡/潜母等没有独立表，回退默认优先级。
+        for ship_type in ("战巡", "超巡", "潜母", "维修", "运输", "风帆", "航战", "重炮"):
+            self.assertEqual(tech_priority_order(ship_type), DEFAULT_TECH_PRIORITY)
+
+    def test_ship_tech_priority_score_uses_bonus_attributes(self):
+        """舰船在某加成舰种下的得分取该舰命中属性里最靠前的一条。"""
+        # 重巡表：机动 0、炮击 1、装填 2、耐久 6
+        self.assertEqual(ship_tech_priority_score("重巡", ["装填", "机动"]), 0)
+        self.assertEqual(ship_tech_priority_score("重巡", ["装填"]), 2)
+        self.assertEqual(ship_tech_priority_score("重巡", ["耐久"]), 6)
+        # 表外属性排在表尾。
+        self.assertEqual(
+            ship_tech_priority_score("重巡", ["不存在属性"]), len(tech_priority_order("重巡"))
+        )
+        # 一个属性都没有时同样排表尾。
+        self.assertEqual(
+            ship_tech_priority_score("重巡", []), len(tech_priority_order("重巡"))
+        )
+        # 无表舰种走默认优先级：装填 0、耐久 4。
+        self.assertEqual(ship_tech_priority_score("战巡", ["装填"]), 0)
+        self.assertEqual(ship_tech_priority_score("战巡", ["耐久"]), 4)
+
+    def test_tech_priority_order_covers_every_ship_type(self):
+        """有表舰种返回自己的表；无表舰种统一回退到 DEFAULT_TECH_PRIORITY。"""
+        for ship_type, expected in [
+            ("战列", ["装填", "命中", "炮击", "防空", "耐久"]),
+            ("重巡", ["机动", "炮击", "装填", "命中", "雷击", "防空", "耐久"]),
+            ("潜艇", ["雷击"]),
+        ]:
+            self.assertEqual(tech_priority_order(ship_type), expected)
+        # 战巡/超巡/潜母等没有独立表，回退默认优先级。
+        for ship_type in ("战巡", "超巡", "潜母", "维修", "运输", "风帆", "航战", "重炮"):
+            self.assertEqual(tech_priority_order(ship_type), DEFAULT_TECH_PRIORITY)
 
     def test_clear_ships_on_empty_database(self):
         with isolated_app_data():
@@ -1435,7 +1453,7 @@ class AppTests(unittest.TestCase):
                     "2023-08-17",
                     {"ship_type": "战列", "rarity": "海上传奇", "tech_points": []},
                 )
-            write_config({"next_ship_types": ["战列"]})
+            write_config({"next_ship_types": [tech_point("战列", "耐久")]})
             with patch.object(
                 config_module.CONFIG_PATH.__class__,
                 "unlink",
@@ -1447,9 +1465,9 @@ class AppTests(unittest.TestCase):
             self.assertEqual(
                 read_config(),
                 {
-                    "next_ship_types": ["战列"],
+                    "next_ship_types": [tech_point("战列", "耐久")],
                     "target_limits": {
-                        "战列": {"is_idling": 1, "is_trained": 1}
+                        tech_point("战列", "耐久"): {"is_idling": 1, "is_trained": 1}
                     },
                     "manual_targets": {},
                     "armament_target_limits": _default_armament_limits(),
@@ -1557,20 +1575,19 @@ class AppTests(unittest.TestCase):
             for ship in list_ships({"ship_types": ["重巡"]}):
                 if ship["name"] == "青叶":
                     update_ship_status(ship["id"], "is_idling", True)
-            save_next_ship_types(["重巡"])
+            save_next_ship_types([tech_point("重巡", "机动")])
             self.assertEqual(
-                next_ships_by_type("both", ["重巡"])[0]["train"]["name"],
+                next_ships_by_type("both", [tech_point("重巡", "机动")])[0]["train"]["name"],
                 "青叶",
             )
 
-            config = toggle_manual_target("重巡", "is_trained", chosen["id"])
+            config = toggle_manual_target(tech_point("重巡", "机动"), "is_trained", chosen["id"])
             self.assertEqual(
-                config["manual_targets"], {"重巡": {"is_trained": [chosen["id"]]}}
+                config["manual_targets"],
+                {tech_point("重巡", "机动"): {"is_trained": [chosen["id"]]}},
             )
             config = read_config()
-            row = next_ships_by_type(
-                "both",
-                ["重巡"],
+            row = next_ships_by_type("both", [tech_point("重巡", "机动")],
                 config["manual_targets"],
                 config["target_limits"],
             )[0]
@@ -1579,14 +1596,14 @@ class AppTests(unittest.TestCase):
             self.assertTrue(row["train_items"][0]["manual"])
             self.assertEqual(row["idle_manual_count"], 0)
 
-            config = toggle_manual_target("重巡", "is_trained", chosen["id"])
+            config = toggle_manual_target(tech_point("重巡", "机动"), "is_trained", chosen["id"])
             self.assertEqual(config["manual_targets"], {})
             with self.assertRaises(ValueError):
-                toggle_manual_target("驱逐", "is_trained", chosen["id"])
+                toggle_manual_target(tech_point("驱逐", "炮击"), "is_trained", chosen["id"])
             with self.assertRaises(ValueError):
-                toggle_manual_target("重巡", "is_trained", 99999)
+                toggle_manual_target(tech_point("重巡", "机动"), "is_trained", 99999)
             with self.assertRaises(ValueError):
-                toggle_manual_target("重巡", "is_trained", True)
+                toggle_manual_target(tech_point("重巡", "机动"), "is_trained", True)
 
     def test_target_limit_controls_manual_capacity_and_auto_fill(self):
         with isolated_app_data():
@@ -1617,23 +1634,21 @@ class AppTests(unittest.TestCase):
                     ships.append(ship)
             for ship in ships:
                 update_ship_status(ship["id"], "is_idling", True)
-            save_next_ship_types(["重巡"])
+            save_next_ship_types([tech_point("重巡", "机动")])
 
-            config = save_target_limit("重巡", "is_trained", 3)
+            config = save_target_limit(tech_point("重巡", "机动"), "is_trained", 3)
             self.assertEqual(
-                config["target_limits"]["重巡"],
+                config["target_limits"][tech_point("重巡", "机动")],
                 {"is_idling": 1, "is_trained": 3},
             )
-            config = toggle_manual_target("重巡", "is_trained", ships[0]["id"])
-            config = toggle_manual_target("重巡", "is_trained", ships[1]["id"])
+            config = toggle_manual_target(tech_point("重巡", "机动"), "is_trained", ships[0]["id"])
+            config = toggle_manual_target(tech_point("重巡", "机动"), "is_trained", ships[1]["id"])
             self.assertEqual(
-                read_config()["manual_targets"]["重巡"]["is_trained"],
+                read_config()["manual_targets"][tech_point("重巡", "机动")]["is_trained"],
                 [ships[0]["id"], ships[1]["id"]],
             )
             config = read_config()
-            row = next_ships_by_type(
-                "both",
-                ["重巡"],
+            row = next_ships_by_type("both", [tech_point("重巡", "机动")],
                 config["manual_targets"],
                 config["target_limits"],
             )[0]
@@ -1645,21 +1660,21 @@ class AppTests(unittest.TestCase):
                 [True, True, False],
             )
 
-            config = toggle_manual_target("重巡", "is_trained", ships[2]["id"])
+            config = toggle_manual_target(tech_point("重巡", "机动"), "is_trained", ships[2]["id"])
             self.assertEqual(
-                read_config()["manual_targets"]["重巡"]["is_trained"],
+                read_config()["manual_targets"][tech_point("重巡", "机动")]["is_trained"],
                 [ships[0]["id"], ships[1]["id"], ships[2]["id"]],
             )
             with self.assertRaises(ValueError):
-                toggle_manual_target("重巡", "is_trained", ships[3]["id"])
+                toggle_manual_target(tech_point("重巡", "机动"), "is_trained", ships[3]["id"])
 
-            config = save_target_limit("重巡", "is_trained", 1)
+            config = save_target_limit(tech_point("重巡", "机动"), "is_trained", 1)
             self.assertEqual(
-                read_config()["manual_targets"]["重巡"]["is_trained"],
+                read_config()["manual_targets"][tech_point("重巡", "机动")]["is_trained"],
                 [ships[0]["id"]],
             )
             self.assertEqual(
-                config["target_limits"]["重巡"]["is_trained"], 1
+                config["target_limits"][tech_point("重巡", "机动")]["is_trained"], 1
             )
 
     def test_save_next_ship_types_keeps_target_config(self):
@@ -1677,16 +1692,17 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
-            save_target_limit("重巡", "is_idling", 2)
-            toggle_manual_target("重巡", "is_idling", ship["id"])
-            save_next_ship_types(["重巡"])
+            save_next_ship_types([tech_point("重巡", "机动")])
+            save_target_limit(tech_point("重巡", "机动"), "is_idling", 2)
+            toggle_manual_target(tech_point("重巡", "机动"), "is_idling", ship["id"])
+            save_next_ship_types([tech_point("重巡", "机动")])
             config = read_config()
             self.assertEqual(
-                config["manual_targets"], {"重巡": {"is_idling": [ship["id"]]}}
+                config["manual_targets"],
+                {tech_point("重巡", "机动"): {"is_idling": [ship["id"]]}},
             )
             self.assertEqual(
-                config["target_limits"]["重巡"]["is_idling"], 2
+                config["target_limits"][tech_point("重巡", "机动")]["is_idling"], 2
             )
             save_next_ship_types([])
             config = read_config()
@@ -1720,33 +1736,30 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
+            save_next_ship_types([tech_point("重巡", "机动")])
             for invalid_limit in (0, 11, -1, True, "3", 2.5):
                 with self.assertRaises(ValueError):
-                    save_target_limit("重巡", "is_trained", invalid_limit)
+                    save_target_limit(tech_point("重巡", "机动"), "is_trained", invalid_limit)
             with self.assertRaises(ValueError):
-                save_target_limit("重巡", "bad_field", 2)
+                save_target_limit(tech_point("重巡", "机动"), "bad_field", 2)
             with self.assertRaises(ValueError):
-                save_target_limit("驱逐", "is_trained", 2)
+                save_target_limit(tech_point("驱逐", "炮击"), "is_trained", 2)
 
-            config = save_target_limit("重巡", "is_trained", 10)
-            self.assertEqual(config["target_limits"]["重巡"]["is_trained"], 10)
-            toggle_manual_target("重巡", "is_trained", chosen["id"])
+            config = save_target_limit(tech_point("重巡", "机动"), "is_trained", 10)
+            self.assertEqual(config["target_limits"][tech_point("重巡", "机动")]["is_trained"], 10)
+            toggle_manual_target(tech_point("重巡", "机动"), "is_trained", chosen["id"])
             delete_ship(chosen["id"])
 
             # 删除舰船后应同步清理悬空的手动录入，且能立刻替换录入新舰娘。
             config = read_config()
             self.assertEqual(config["manual_targets"], {})
             replacement = list_ships({"ship_types": ["重巡"]})[0]
-            config = toggle_manual_target(
-                "重巡", "is_trained", replacement["id"]
+            config = toggle_manual_target(tech_point("重巡", "机动"), "is_trained", replacement["id"]
             )
             self.assertEqual(
-                config["manual_targets"]["重巡"]["is_trained"], [replacement["id"]]
+                config["manual_targets"][tech_point("重巡", "机动")]["is_trained"], [replacement["id"]]
             )
-            row = next_ships_by_type(
-                "both",
-                ["重巡"],
+            row = next_ships_by_type("both", [tech_point("重巡", "机动")],
                 config["manual_targets"],
                 config["target_limits"],
             )[0]
@@ -1780,19 +1793,17 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
-            toggle_manual_target("重巡", "is_idling", chosen["id"])
+            save_next_ship_types([tech_point("重巡", "机动")])
+            toggle_manual_target(tech_point("重巡", "机动"), "is_idling", chosen["id"])
             self.assertEqual(
-                read_config()["manual_targets"]["重巡"]["is_idling"],
+                read_config()["manual_targets"][tech_point("重巡", "机动")]["is_idling"],
                 [chosen["id"]],
             )
 
             update_ship_status(chosen["id"], "is_idling", True)
             self.assertEqual(read_config()["manual_targets"], {})
             config = read_config()
-            row = next_ships_by_type(
-                "both",
-                ["重巡"],
+            row = next_ships_by_type("both", [tech_point("重巡", "机动")],
                 config["manual_targets"],
                 config["target_limits"],
             )[0]
@@ -1817,7 +1828,7 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
+            save_next_ship_types([tech_point("重巡", "机动")])
             real_write = config_module.write_config
 
             def slow_write(config):
@@ -1830,14 +1841,14 @@ class AppTests(unittest.TestCase):
                 with ThreadPoolExecutor(max_workers=8) as executor:
                     jobs = [
                         executor.submit(
-                            save_target_limit, "重巡", field, 3
+                            save_target_limit, tech_point("重巡", "机动"), field, 3
                         )
                         for field in ("is_idling", "is_trained")
                     ]
                     for job in jobs:
                         job.result()
 
-            limits = read_config()["target_limits"]["重巡"]
+            limits = read_config()["target_limits"][tech_point("重巡", "机动")]
             self.assertEqual(limits["is_idling"], 3)
             self.assertEqual(limits["is_trained"], 3)
 
@@ -1899,8 +1910,8 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
-            toggle_manual_target("重巡", "is_idling", chosen["id"])
+            save_next_ship_types([tech_point("重巡", "机动")])
+            toggle_manual_target(tech_point("重巡", "机动"), "is_idling", chosen["id"])
             update_ship_status(chosen["id"], "is_trained", True)
             # 练级完成会同时把挂机置为完成，挂机名额必须一并释放。
             self.assertEqual(read_config()["manual_targets"], {})
@@ -1909,11 +1920,10 @@ class AppTests(unittest.TestCase):
                 ship for ship in list_ships({"ship_types": ["重巡"]})
                 if ship["name"] == "青叶"
             ][0]
-            config = toggle_manual_target(
-                "重巡", "is_idling", replacement["id"]
+            config = toggle_manual_target(tech_point("重巡", "机动"), "is_idling", replacement["id"]
             )
             self.assertEqual(
-                config["manual_targets"]["重巡"]["is_idling"],
+                config["manual_targets"][tech_point("重巡", "机动")]["is_idling"],
                 [replacement["id"]],
             )
 
@@ -1932,10 +1942,10 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
+            save_next_ship_types([tech_point("重巡", "机动")])
             update_ship_status(done["id"], "is_trained", True)
             with self.assertRaises(ValueError):
-                toggle_manual_target("重巡", "is_trained", done["id"])
+                toggle_manual_target(tech_point("重巡", "机动"), "is_trained", done["id"])
 
     def test_release_manual_target_uses_config_lock(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -1955,8 +1965,8 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
-            toggle_manual_target("重巡", "is_idling", ship["id"])
+            save_next_ship_types([tech_point("重巡", "机动")])
+            toggle_manual_target(tech_point("重巡", "机动"), "is_idling", ship["id"])
             real_write = config_module.write_config
 
             def slow_write(config):
@@ -1970,14 +1980,17 @@ class AppTests(unittest.TestCase):
                     futures = [
                         executor.submit(release_manual_target, ship["id"]),
                         executor.submit(
-                            save_target_limit, "重巡", "is_trained", 3
+                            save_target_limit,
+                            tech_point("重巡", "机动"),
+                            "is_trained",
+                            3,
                         ),
                     ]
                     for future in futures:
                         future.result()
 
             config = read_config()
-            self.assertEqual(config["target_limits"]["重巡"]["is_trained"], 3)
+            self.assertEqual(config["target_limits"][tech_point("重巡", "机动")]["is_trained"], 3)
             self.assertEqual(config["manual_targets"], {})
 
     def test_clear_ships_serialized_with_config_writes(self):
@@ -1998,7 +2011,7 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-            save_next_ship_types(["重巡"])
+            save_next_ship_types([tech_point("重巡", "机动")])
             real_write = config_module.write_config
 
             def slow_write(config):
@@ -2010,7 +2023,7 @@ class AppTests(unittest.TestCase):
             with patch("blhx.storage.config.write_config", slow_write):
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     futures = [
-                        executor.submit(save_target_limit, "重巡", "is_trained", 3),
+                        executor.submit(save_target_limit, tech_point("重巡", "机动"), "is_trained", 3),
                         executor.submit(clear_ships),
                     ]
                     for future in futures:
@@ -2019,7 +2032,7 @@ class AppTests(unittest.TestCase):
             # 无论谁先执行，清空后配置都必须回到空；不允许旧快照把配置写回来。
             config = read_config()
             if list_ships({}):
-                self.assertEqual(config["target_limits"]["重巡"]["is_trained"], 3)
+                self.assertEqual(config["target_limits"][tech_point("重巡", "机动")]["is_trained"], 3)
             else:
                 self.assertEqual(
             config,
@@ -2045,9 +2058,9 @@ class AppTests(unittest.TestCase):
         self.assertIn("function syncNextTypes()", html)
         self.assertIn("const stale = versionAtStart !== selectionVersion;", html)
         self.assertIn("applyRemoteConfig(result, stale || typesDirty || hadPendingSave);", html)
-        # 推荐舰种顺序与空行隐藏
+        # 推荐舰种顺序（由后端下发顺序决定）与空行隐藏
         self.assertIn("function recommendSortKey(shipType) {", html)
-        self.assertIn("recommend_ship_types", html)
+        self.assertIn("nextTargetOrder", html)
         self.assertIn("function rowHasTargets(row) {", html)
         self.assertIn("所选舰种暂无可推荐舰娘", html)
         # 默认仅展示需要练级的舰船，已练级不预设筛选；重置筛选后保持一致。
@@ -2247,15 +2260,16 @@ class AppTests(unittest.TestCase):
         self.assertIn("断言: true", result.stdout)
 
     def test_recommend_order_and_empty_types_hidden(self):
+        """推荐行按加成舰种顺序（BONUS_SHIP_TYPE_ORDER）排列；没有候选的行必须隐藏。"""
         with isolated_app_data():
             with get_connection() as connection:
-                for name, ship_type in [
-                    ("运输一", "运输"),
-                    ("轻巡一", "轻巡"),
-                    ("驱逐一", "驱逐"),
-                    ("轻航一", "轻航"),
-                    ("战列一", "战列"),
-                    ("重炮一", "重炮"),
+                for name, ship_type, attribute in [
+                    ("运输一", "运输", "耐久"),
+                    ("轻巡一", "轻巡", "命中"),
+                    ("驱逐一", "驱逐", "机动"),
+                    ("轻航一", "轻航", "装填"),
+                    ("战列一", "战列", "耐久"),
+                    ("重炮一", "重炮", "耐久"),
                 ]:
                     insert_ship(
                         connection,
@@ -2267,42 +2281,74 @@ class AppTests(unittest.TestCase):
                             "tech_points": [
                                 {
                                     "stage": "解锁图鉴",
-                                    "attribute": f"{ship_type} 耐久",
+                                    "attribute": f"{ship_type} {attribute}",
                                     "points": 0,
                                 }
                             ],
                         },
                     )
             rows = next_ships_by_type(
-                "both",
-                ["运输", "轻巡", "驱逐", "轻航", "战列", "重炮"],
+                "both", ["运输", "轻巡", "驱逐", "轻航", "战列", "重炮"]
             )
+            # 顺序由 BONUS_SHIP_TYPE_ORDER 决定（驱逐<轻巡<战列<轻航<重炮<运输）。
             self.assertEqual(
                 [row["ship_type"] for row in rows],
-                ["战列", "轻航", "轻巡", "驱逐", "运输", "重炮"],
+                ["驱逐", "轻巡", "战列", "轻航", "重炮", "运输"],
             )
 
-    def test_recommend_normalizes_ship_type_aliases(self):
+            # 配置了但没有对应舰船的舰种行不出现。
+            rows = next_ships_by_type("both", ["运输", "潜艇"])
+            self.assertEqual([row["ship_type"] for row in rows], ["运输"])
+
+    def test_recommend_orders_by_attribute_priority(self):
+        """同一加成舰种内按该舰种优先级表挑人。
+
+        配置「重巡」这一行时，两艘船都属于重巡；排序看各自在该舰种下的
+        最优属性：机动在重巡表排第 0、装填排第 2，因此动机会被优先推荐，
+        与实装日期和名称无关。
+        """
         with isolated_app_data():
             with get_connection() as connection:
                 insert_ship(
                     connection,
-                    "皇家财富号",
+                    "一装填",
                     "2024-01-01",
                     {
-                        "ship_type": "风帆S",
+                        "ship_type": "重巡",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "风帆 耐久", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "重巡/重炮/超巡 装填", "points": 0}
                         ],
                     },
                 )
-            rows = next_ships_by_type(
-                "both", ["风帆M", "风帆S", "风帆"]
+                insert_ship(
+                    connection,
+                    "二机动",
+                    "2023-01-01",
+                    {
+                        "ship_type": "重巡",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "重巡/重炮/超巡 机动", "points": 0}
+                        ],
+                    },
+                )
+            # 名称刻意让装填舰船字典序更靠前：只有真正比较属性优先级才会选「二机动」。
+            self.assertEqual(
+                next_ship("idle", ship_types=["重巡"])["name"], "二机动"
             )
-            self.assertEqual([row["ship_type"] for row in rows], ["风帆"])
+            rows = next_ships_by_type(
+                "idle",
+                ["重巡"],
+                target_limits={"重巡": {"is_idling": 2, "is_trained": 1}},
+            )
+            self.assertEqual(
+                [item["ship"]["name"] for item in rows[0]["idle_items"]],
+                ["二机动", "一装填"],
+            )
 
-    def test_recommend_hides_ship_types_without_targets(self):
+    def test_recommend_hides_tech_points_without_targets(self):
+        """挂机与练级都没有目标项的科技点行必须隐藏。"""
         with isolated_app_data():
             with get_connection() as connection:
                 only_idle = insert_ship(
@@ -2317,7 +2363,7 @@ class AppTests(unittest.TestCase):
                         ],
                     },
                 )
-                idle_and_train = insert_ship(
+                done = insert_ship(
                     connection,
                     "重巡一",
                     "2024-01-01",
@@ -2325,11 +2371,11 @@ class AppTests(unittest.TestCase):
                         "ship_type": "重巡",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "重巡 耐久", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
                         ],
                     },
                 )
-                idle_and_train_2 = insert_ship(
+                idle_and_train = insert_ship(
                     connection,
                     "重巡二",
                     "2024-01-02",
@@ -2337,7 +2383,7 @@ class AppTests(unittest.TestCase):
                         "ship_type": "重巡",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "重巡 耐久", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
                         ],
                     },
                 )
@@ -2349,30 +2395,50 @@ class AppTests(unittest.TestCase):
                         "ship_type": "驱逐",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "驱逐 耐久", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "驱逐 机动", "points": 0}
                         ],
                     },
                 )
             # 重巡全部已完成，两个模式都无候选，不应出现在结果中。
+            update_ship_status(done["id"], "is_trained", True)
             update_ship_status(idle_and_train["id"], "is_trained", True)
-            update_ship_status(idle_and_train_2["id"], "is_trained", True)
             update_ship_status(only_idle["id"], "is_idling", True)
-            # both 模式下只要任一模式有目标就保留；重巡两个模式都为空必须被过滤。
-            rows = next_ships_by_type("both", ["战列", "重巡", "驱逐"])
-            self.assertEqual([row["ship_type"] for row in rows], ["战列", "驱逐"])
-            self.assertTrue(rows[0]["train_items"])
-            self.assertFalse(rows[0]["idle_items"])
 
-            # 战列已挂机，idle 模式没有目标项，应被隐藏；重巡仍为空被过滤。
-            rows = next_ships_by_type("idle", ["战列", "重巡", "驱逐"])
-            self.assertEqual([row["ship_type"] for row in rows], ["驱逐"])
-            self.assertTrue(rows[0]["idle_items"])
+            keys = [
+                tech_point("战列", "耐久"),
+                tech_point("重巡", "机动"),
+                tech_point("驱逐", "机动"),
+            ]
+            rows = next_ships_by_type("both", keys)
+            # 重巡行两个模式都为空被过滤；战列只剩练级目标。
+            self.assertEqual(
+                [row["ship_type"] for row in rows], ["驱逐", "战列"]
+            )
+            by_type = {row["ship_type"]: row for row in rows}
+            self.assertTrue(by_type["战列"]["train_items"])
+            self.assertFalse(by_type["战列"]["idle_items"])
 
-            # train 模式：驱逐仍在练级候选内，战列已完成练级? 用实际状态校验空行过滤。
-            rows = next_ships_by_type("train", ["战列", "重巡", "驱逐"])
-            self.assertNotIn("重巡", [row["ship_type"] for row in rows])
-            for row in rows:
-                self.assertTrue(row["train_items"])
+    def test_recommend_normalizes_ship_type_aliases(self):
+        """风帆M/S/V 在加成舰种里统一归一为「风帆」，科技点行不会重复。"""
+        with isolated_app_data():
+            with get_connection() as connection:
+                insert_ship(
+                    connection,
+                    "皇家财富号",
+                    "2024-01-01",
+                    {
+                        "ship_type": "风帆S",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "风帆 耐久", "points": 0}
+                        ],
+                    },
+                )
+            # 推荐选项是全部加成舰种，风帆只出现一次（别名已归一）。
+            options = [option["ship_type"] for option in available_next_ship_types()]
+            self.assertEqual(options.count("风帆"), 1)
+            rows = next_ships_by_type("both", ["风帆"])
+            self.assertEqual([row["ship_type"] for row in rows], ["风帆"])
 
     def test_recommend_rows_expose_pending_counts(self):
         with isolated_app_data():
@@ -2385,7 +2451,7 @@ class AppTests(unittest.TestCase):
                         "ship_type": "战列",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "耐久", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "战列 耐久", "points": 0}
                         ],
                     },
                 )
@@ -2397,7 +2463,7 @@ class AppTests(unittest.TestCase):
                         "ship_type": "战列",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "耐久", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "战列 耐久", "points": 0}
                         ],
                     },
                 )
@@ -2409,7 +2475,7 @@ class AppTests(unittest.TestCase):
                         "ship_type": "重巡",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "机动", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "重巡 机动", "points": 0}
                         ],
                     },
                 )
@@ -2418,18 +2484,133 @@ class AppTests(unittest.TestCase):
             update_ship_status(done_ship["id"], "is_idling", True)
             update_ship_status(done_ship["id"], "is_trained", True)
 
-            rows = {row["ship_type"]: row for row in next_ships_by_type("both", ["战列"])}
-            self.assertEqual(rows["战列"]["idle_count"], 1)
-            self.assertEqual(rows["战列"]["train_count"], 1)
+            key = tech_point("战列", "耐久")
+            rows = {row["ship_type"]: row for row in next_ships_by_type("both", [key])}
+            self.assertEqual(rows[key]["idle_count"], 1)
+            self.assertEqual(rows[key]["train_count"], 1)
 
             # 计数口径与推荐徽标一致，避免两处统计漂移。
             option = next(
-                item
-                for item in available_next_ship_types()
-                if item["ship_type"] == "战列"
+                item for item in available_next_ship_types() if item["ship_type"] == key
             )
-            self.assertEqual(rows["战列"]["idle_count"], option["idle_count"])
-            self.assertEqual(rows["战列"]["train_count"], option["train_count"])
+            self.assertEqual(rows[key]["idle_count"], option["idle_count"])
+            self.assertEqual(rows[key]["train_count"], option["train_count"])
+
+    def test_tag_recommendation_options_include_tags_last(self):
+        """推荐目标 = 15 个加成舰种 + 2 个自定义标签，标签排在全部舰种之后。"""
+        with isolated_app_data():
+            self.assertEqual(
+                [item["ship_type"] for item in available_next_ship_types()],
+                [*RECOMMEND_TECH_SHIP_TYPES, *CUSTOM_SHIP_TAGS],
+            )
+            options = {item["ship_type"]: item for item in available_next_ship_types()}
+            self.assertFalse(options["驱逐"]["is_tag"])
+            self.assertTrue(options["小船"]["is_tag"])
+            self.assertTrue(options["联动"]["is_tag"])
+            # 标签没有属性优先级表。
+            self.assertFalse(options["小船"]["has_priority_table"])
+            self.assertEqual(options["小船"]["priority"], [])
+            # 标签可以与舰种一起配置。
+            self.assertEqual(
+                save_next_ship_types(["联动", "驱逐", "小船"]),
+                ["驱逐", "小船", "联动"],
+            )
+
+    def test_tag_recommendation_matches_tagged_ships_without_bonus(self):
+        """标签船通常没有科技点，推荐不能附加“需要练级 = 是”。"""
+        with isolated_app_data():
+            with get_connection() as connection:
+                small = insert_ship(
+                    connection,
+                    "小企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+                plain = insert_ship(
+                    connection,
+                    "企业",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "海上传奇", "tech_points": []},
+                )
+            with get_connection() as connection:
+                refresh_ship_tags(connection)
+            # 无科技点 → 不满足 needs_training，但标签行仍应命中。
+            self.assertFalse(
+                list_ships({"name": "小企业"})[0]["needs_training"]
+            )
+            rows = next_ships_by_type("both", ["小船"])
+            self.assertEqual([row["ship_type"] for row in rows], ["小船"])
+            self.assertTrue(rows[0]["is_tag"])
+            self.assertEqual(
+                [item["ship"]["name"] for item in rows[0]["idle_items"]],
+                ["小企业"],
+            )
+            # 非标签船不会被带进标签行。
+            self.assertEqual(
+                [ship["name"] for ship in list_ships({"ship_types": ["小船"]})],
+                ["小企业"],
+            )
+            self.assertNotIn(
+                plain["id"],
+                [item["ship"]["id"] for item in rows[0]["idle_items"]],
+            )
+            self.assertIn(
+                small["id"],
+                [item["ship"]["id"] for item in rows[0]["idle_items"]],
+            )
+
+    def test_tag_recommendation_sorts_by_rarity_then_date(self):
+        """标签行按稀有度 > 实装日期 > 名称排序（标签船没有属性优先级）。"""
+        with isolated_app_data():
+            with get_connection() as connection:
+                insert_ship(
+                    connection,
+                    "小乙",
+                    "2024-01-01",
+                    {"ship_type": "航母", "rarity": "超稀有", "tech_points": []},
+                )
+                insert_ship(
+                    connection,
+                    "小甲",
+                    "2023-01-01",
+                    {"ship_type": "航母", "rarity": "精锐", "tech_points": []},
+                )
+            with get_connection() as connection:
+                refresh_ship_tags(connection)
+            rows = next_ships_by_type(
+                "idle",
+                ["小船"],
+                target_limits={"小船": {"is_idling": 3, "is_trained": 1}},
+            )
+            # 稀有度优先级：超稀有低于精锐，因此「小甲」在前；同名次再按日期。
+            self.assertEqual(
+                [item["ship"]["name"] for item in rows[0]["idle_items"]],
+                ["小甲", "小乙"],
+            )
+
+    def test_tag_recommendation_keeps_rows_separate_from_ship_types(self):
+        """同一艘船既属于加成舰种又带标签时，分别出现在各自的行里。"""
+        with isolated_app_data():
+            with get_connection() as connection:
+                insert_ship(
+                    connection,
+                    "小天鹅",
+                    "2024-01-01",
+                    {
+                        "ship_type": "驱逐",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "驱逐 机动", "points": 0}
+                        ],
+                    },
+                )
+            with get_connection() as connection:
+                refresh_ship_tags(connection)
+            # 有科技点的船不算“小船”（小船的规则要求无科技点）。
+            self.assertEqual(list_ships({"ship_types": ["小船"]}), [])
+            rows = next_ships_by_type("both", ["驱逐", "小船"])
+            self.assertEqual([row["ship_type"] for row in rows], ["驱逐"])
+            self.assertFalse(rows[0]["is_tag"])
 
     def test_custom_small_ship_tag_filter_and_recommendation(self):
         """标签“小船”= 无科技点且名称以“小”开头，可筛选、可推荐、排在最后。"""
@@ -2450,7 +2631,7 @@ class AppTests(unittest.TestCase):
                         "ship_type": "驱逐",
                         "rarity": "精锐",
                         "tech_points": [
-                            {"stage": "解锁图鉴", "attribute": "机动", "points": 0}
+                            {"stage": "解锁图鉴", "attribute": "驱逐 机动", "points": 0}
                         ],
                     },
                 )
@@ -2500,25 +2681,20 @@ class AppTests(unittest.TestCase):
                 [ship["name"] for ship in list_ships({"needs_training": "是"})],
             )
 
-            # 可配置为推荐舰种，且排序固定在最后。
+            # 推荐以加成舰种为单位：只有带科技点的舰船能进入推荐候选。
             self.assertEqual(
-                save_next_ship_types(["航母", "小船"]), ["航母", "小船"]
+                [row["ship_type"] for row in next_ships_by_type("both", ["驱逐"])],
+                ["驱逐"],
             )
-            options = [item["ship_type"] for item in available_next_ship_types()]
-            # 标签按声明顺序排在所有舰种之后。
-            self.assertEqual(options[-len(CUSTOM_SHIP_TAGS):], CUSTOM_SHIP_TAGS)
-            self.assertEqual(options[0], RECOMMEND_SHIP_TYPE_ORDER[0])
-
-            rows = next_ships_by_type("both", ["驱逐", "小船"])
-            # 有科技点的小天鹅仍归驱逐行，小船行只收小企业，且固定排在最后。
-            self.assertEqual([row["ship_type"] for row in rows], ["驱逐", "小船"])
+            rows = next_ships_by_type("both", ["驱逐"])
+            self.assertEqual([row["ship_type"] for row in rows], ["驱逐"])
             self.assertEqual(
                 [item["ship"]["name"] for item in rows[0]["idle_items"]], ["小天鹅"]
             )
-            self.assertEqual(rows[1]["idle_count"], 1)
-            self.assertEqual(rows[1]["train_count"], 0)
+            # 无科技点的小船（小企业）不会出现在任何推荐行里。
             self.assertEqual(
-                [item["ship"]["name"] for item in rows[1]["idle_items"]], ["小企业"]
+                [ship["name"] for ship in list_ships({"ship_types": ["小船"]})],
+                ["小企业"],
             )
 
             # 兵装列表的舰种筛选同样支持小船；小船没有兵装时结果为空。
@@ -2604,12 +2780,11 @@ class AppTests(unittest.TestCase):
             self.assertIsNone(ship_tag_condition("联动"))
             self.assertIn("联动", CATEGORY_SHIP_TAGS)
             self.assertEqual(list_ships({"ship_types": ["联动"]}), [])
-            # 仍可配置为推荐舰种，只是计数为 0；排序固定在最后。
-            self.assertEqual(save_next_ship_types(["联动"]), ["联动"])
-            options = {item["ship_type"]: item for item in available_next_ship_types()}
-            self.assertEqual(options["联动"]["idle_count"], 0)
-            self.assertEqual(options["联动"]["train_count"], 0)
+            # 标签不是加成舰种：无科技点的舰船不产生推荐候选。
             self.assertEqual(next_ships_by_type("both", ["联动"]), [])
+            self.assertEqual(
+                next_ships_by_type("both", ["重巡"]), []
+            )
 
     def test_untagged_ships_are_not_matched_by_tag_filter(self):
         """标签以同步产出的 tags 为准：未重刷的存量数据不会凭空命中标签。
@@ -2637,12 +2812,8 @@ class AppTests(unittest.TestCase):
                 ["小企业"],
             )
             self.assertEqual(list_ships({"ship_types": ["航母"]})[0]["tags"], [])
-            # 推荐侧同样以 tags 为准：未同步时计数为 0，不出候选。
-            options = {
-                item["ship_type"]: item for item in available_next_ship_types()
-            }
-            self.assertEqual(options["小船"]["idle_count"], 0)
-            self.assertEqual(next_ships_by_type("both", ["小船"]), [])
+            # 无科技点的舰船不产生推荐候选。
+            self.assertEqual(next_ships_by_type("both", ["航母"]), [])
 
             # 重刷同步后标签生效。
             with get_connection() as connection:
@@ -2863,14 +3034,12 @@ class AppTests(unittest.TestCase):
                 list_ships({"ship_types": ["小船"]})[0]["tags"], ["小船", "联动"]
             )
 
-            # 推荐侧也按 tags 统计与出候选。
-            options = {
-                item["ship_type"]: item for item in available_next_ship_types()
-            }
-            self.assertEqual(options["联动"]["idle_count"], 2)
-            rows = next_ships_by_type("both", ["联动"])
+            # 推荐以加成舰种为单位：联动舰船提供重巡加成时计入重巡行。
+            options = {item["ship_type"]: item for item in available_next_ship_types()}
+            self.assertEqual(options["重巡"]["idle_count"], 2)
+            rows = next_ships_by_type("both", ["重巡"])
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["ship_type"], "联动")
+            self.assertEqual(rows[0]["ship_type"], "重巡")
 
     def test_collab_tag_requires_category_members(self):
         """联动标签必须由名称集合驱动：未提供集合时按不命中处理。"""
@@ -2997,7 +3166,7 @@ class AppTests(unittest.TestCase):
                     },
                 )
             update_ship_status(ship["id"], "is_idling", True)
-            write_config({"next_ship_types": ["战列"]})
+            write_config({"next_ship_types": [tech_point("战列", "耐久")]})
             self.assertTrue(config_module.CONFIG_PATH.exists())
 
             self.assertEqual(clear_ships(), 1)
@@ -3575,12 +3744,21 @@ class ArmamentTests(unittest.TestCase):
                     connection,
                     "拉菲",
                     "2023-08-17",
-                    {"ship_type": "驱逐", "rarity": "精锐", "tech_points": []},
+                    {
+                        "ship_type": "驱逐",
+                        "rarity": "精锐",
+                        "tech_points": [
+                            {"stage": "解锁图鉴", "attribute": "驱逐 机动", "points": 0},
+                            {"stage": "解锁图鉴", "attribute": "驱逐 炮击", "points": 0},
+                        ],
+                    },
                 )
             save_armament_target_limit("collab", "is_built", 3)
             # 保存推荐舰种、写入手工录入、清空舰船状态都不能丢掉兵装配置。
-            save_next_ship_types(["驱逐"])
-            save_target_limit("驱逐", "is_idling", 2)
+            save_next_ship_types(
+                [tech_point("驱逐", "机动"), tech_point("驱逐", "炮击")]
+            )
+            save_target_limit(tech_point("驱逐", "炮击"), "is_idling", 2)
             config = read_config()
             self.assertEqual(config["armament_target_limits"]["collab"]["is_built"], 3)
 

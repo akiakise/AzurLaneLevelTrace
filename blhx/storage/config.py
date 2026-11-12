@@ -10,6 +10,7 @@ from ..core.constants import (
     ARMAMENT_MANUAL_FIELDS,
     CONFIG_PATH,
     LOGGER,
+    bonus_ship_type_sort_key,
     normalize_ship_type,
 )
 from .db import get_connection
@@ -35,17 +36,17 @@ def normalize_target_limit(value: Any) -> int:
 
 
 def _normalize_ship_type_list(value: Any) -> list[str]:
+    """规范化推荐舰种（加成舰种）列表：展开别名、去重，并按展示顺序排列。"""
     if not isinstance(value, list) or not all(
         isinstance(item, str) for item in value
     ):
         return []
-    return list(
-        dict.fromkeys(
-            normalize_ship_type(item)
-            for item in value
-            if normalize_ship_type(item)
-        )
-    )
+    ship_types: list[str] = []
+    for item in value:
+        ship_type = normalize_ship_type(item)
+        if ship_type and ship_type not in ship_types:
+            ship_types.append(ship_type)
+    return sorted(ship_types, key=bonus_ship_type_sort_key)
 
 
 def _normalize_ship_ids(value: Any) -> list[int]:
@@ -67,10 +68,10 @@ def _normalize_target_limits(
 ) -> dict[str, dict[str, int]]:
     source = value if isinstance(value, dict) else {}
     limits: dict[str, dict[str, int]] = {}
-    for ship_type in ship_types:
-        raw = source.get(ship_type)
+    for key in ship_types:
+        raw = source.get(key)
         raw = raw if isinstance(raw, dict) else {}
-        limits[ship_type] = {
+        limits[key] = {
             field: normalize_target_limit(raw.get(field))
             for field in MANUAL_TARGET_FIELDS
         }
@@ -84,20 +85,20 @@ def _normalize_manual_targets(
     if not isinstance(value, dict):
         return {}
     manual_targets: dict[str, dict[str, list[int]]] = {}
-    for raw_ship_type, targets in value.items():
-        if not isinstance(raw_ship_type, str) or not isinstance(targets, dict):
+    for raw_key, targets in value.items():
+        if not isinstance(raw_key, str) or not isinstance(targets, dict):
             continue
-        ship_type = normalize_ship_type(raw_ship_type)
-        if ship_type not in target_limits:
+        key = normalize_ship_type(raw_key)
+        if not key or key not in target_limits:
             continue
         normalized: dict[str, list[int]] = {}
         for field in MANUAL_TARGET_FIELDS:
             ship_ids = _normalize_ship_ids(targets.get(field))
-            ship_ids = ship_ids[: target_limits[ship_type][field]]
+            ship_ids = ship_ids[: target_limits[key][field]]
             if ship_ids:
                 normalized[field] = ship_ids
         if normalized:
-            manual_targets[ship_type] = normalized
+            manual_targets[key] = normalized
     return manual_targets
 
 
@@ -191,14 +192,14 @@ def _drop_missing_ship_ids(
 
     existing = find_existing_ship_ids(ship_ids)
     cleaned: dict[str, dict[str, list[int]]] = {}
-    for ship_type, targets in manual_targets.items():
+    for key, targets in manual_targets.items():
         kept: dict[str, list[int]] = {}
         for field, ids in targets.items():
             kept_ids = [ship_id for ship_id in ids if ship_id in existing]
             if kept_ids:
                 kept[field] = kept_ids
         if kept:
-            cleaned[ship_type] = kept
+            cleaned[key] = kept
     return cleaned
 
 
@@ -273,7 +274,7 @@ def remove_config() -> None:
         return
     except OSError as error:
         LOGGER.error("删除配置文件失败: %s", error)
-        raise ValueError(f"删除推荐舰种配置失败：{error}") from error
+        raise ValueError(f"删除推荐配置失败：{error}") from error
 
 
 def save_next_ship_types(ship_types: list[str]) -> list[str]:
@@ -282,36 +283,34 @@ def save_next_ship_types(ship_types: list[str]) -> list[str]:
 
 
 def _save_next_ship_types(ship_types: list[str]) -> list[str]:
-    from ..domain.recommendations import _validate_known_ship_types
+    from ..domain.recommendations import validate_ship_types
 
     if not isinstance(ship_types, list) or not all(
         isinstance(value, str) for value in ship_types
     ):
-        raise ValueError("next_ship_types 必须是舰种列表")
-    ship_types = _normalize_ship_type_list(ship_types)
-    # 推荐舰种与舰船现状解绑：只要舰种合法就可以保存，即使当前没有可练级舰娘。
-    # 后续同步/导入出现新的可练级舰船时，推荐页面会按既有配置自动更新。
-    _validate_known_ship_types(ship_types)
+        raise ValueError("next_ship_types 必须是加成舰种或自定义标签列表")
+    keys = validate_ship_types(ship_types)
     current = read_config()
     write_config(
         {
-            "next_ship_types": ship_types,
+            "next_ship_types": keys,
             "target_limits": current["target_limits"],
             "manual_targets": current["manual_targets"],
             "armament_target_limits": current["armament_target_limits"],
             "armament_manual_targets": current["armament_manual_targets"],
         }
     )
-    return ship_types
+    return keys
 
 
 def _require_selected_ship_type(config: dict[str, Any], ship_type: str) -> str:
-    ship_type = normalize_ship_type(ship_type)
-    if not ship_type:
+    """校验加成舰种已加入推荐配置，并返回规范化后的舰种。"""
+    key = normalize_ship_type(str(ship_type or "").strip())
+    if not key:
         raise ValueError("ship_type 不能为空")
-    if ship_type not in config["next_ship_types"]:
-        raise ValueError(f"舰种「{ship_type}」不在推荐舰种配置中")
-    return ship_type
+    if key not in config["next_ship_types"]:
+        raise ValueError(f"舰种「{key}」不在推荐配置中")
+    return key
 
 
 def _require_field(field: str) -> str:
@@ -320,36 +319,36 @@ def _require_field(field: str) -> str:
     return field
 
 
-def save_target_limit(ship_type: str, field: str, limit: Any) -> dict[str, Any]:
+def save_target_limit(key: str, field: str, limit: Any) -> dict[str, Any]:
     with config_transaction():
-        return _save_target_limit(ship_type, field, limit)
+        return _save_target_limit(key, field, limit)
 
 
-def _save_target_limit(ship_type: str, field: str, limit: Any) -> dict[str, Any]:
+def _save_target_limit(key: str, field: str, limit: Any) -> dict[str, Any]:
     config = read_config()
-    ship_type = _require_selected_ship_type(config, ship_type)
+    key = _require_selected_ship_type(config, key)
     field = _require_field(field)
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise ValueError("limit 必须是 1 到 10 之间的整数")
     if not 1 <= limit <= MAX_TARGET_LIMIT:
         raise ValueError(f"limit 必须是 1 到 {MAX_TARGET_LIMIT} 之间的整数")
     target_limits = {
-        key: dict(value) for key, value in config["target_limits"].items()
+        item: dict(value) for item, value in config["target_limits"].items()
     }
-    target_limits[ship_type][field] = limit
+    target_limits[key][field] = limit
     manual_targets = {
-        key: {name: list(ids) for name, ids in value.items()}
-        for key, value in config["manual_targets"].items()
+        item: {name: list(ids) for name, ids in value.items()}
+        for item, value in config["manual_targets"].items()
     }
-    targets = manual_targets.get(ship_type, {})
+    targets = manual_targets.get(key, {})
     if len(targets.get(field, [])) > limit:
         targets[field] = targets[field][:limit]
         if not targets[field]:
             targets.pop(field, None)
         if targets:
-            manual_targets[ship_type] = targets
+            manual_targets[key] = targets
         else:
-            manual_targets.pop(ship_type, None)
+            manual_targets.pop(key, None)
     write_config(
         {
             "next_ship_types": config["next_ship_types"],
@@ -362,76 +361,77 @@ def _save_target_limit(ship_type: str, field: str, limit: Any) -> dict[str, Any]
     return read_config()
 
 
-def _active_manual_ids(
-    ship_type: str, field: str, ship_ids: list[int]
-) -> list[int]:
+def _active_manual_ids(key: str, field: str, ship_ids: list[int]) -> list[int]:
     if not ship_ids:
         return []
+    from ..domain.recommendations import ship_bonus_ship_types
     from ..domain.ships import list_ships
 
-    rows = list_ships({"ship_ids": ship_ids, "ship_types": [ship_type]})
+    rows = list_ships({"ship_ids": ship_ids})
     by_id = {row["id"]: row for row in rows}
     return [
         ship_id
         for ship_id in ship_ids
-        if ship_id in by_id and by_id[ship_id][field] is not True
+        if ship_id in by_id
+        and key in ship_bonus_ship_types(by_id[ship_id])
+        and by_id[ship_id][field] is not True
     ]
 
 
 def toggle_manual_target(
-    ship_type: str,
+    key: str,
     field: str,
     ship_id: Any,
 ) -> dict[str, Any]:
-    """人工录入/取消某舰种某模式下的舰娘；已存在则移除。"""
+    """人工录入/取消某科技点行某模式下的舰娘；已存在则移除。"""
     with config_transaction():
-        return _toggle_manual_target(ship_type, field, ship_id)
+        return _toggle_manual_target(key, field, ship_id)
 
 
 def _toggle_manual_target(
-    ship_type: str,
+    key: str,
     field: str,
     ship_id: Any,
 ) -> dict[str, Any]:
     config = read_config()
-    ship_type = _require_selected_ship_type(config, ship_type)
+    key = _require_selected_ship_type(config, key)
     field = _require_field(field)
-    limit = config["target_limits"][ship_type][field]
+    limit = config["target_limits"][key][field]
     manual_targets = {
-        key: {name: list(ids) for name, ids in value.items()}
-        for key, value in config["manual_targets"].items()
+        item: {name: list(ids) for name, ids in value.items()}
+        for item, value in config["manual_targets"].items()
     }
-    targets = manual_targets.setdefault(ship_type, {})
+    targets = manual_targets.setdefault(key, {})
     ship_ids = targets.setdefault(field, [])
     if ship_id is None:
         ship_ids.clear()
     else:
         if isinstance(ship_id, bool) or not isinstance(ship_id, int) or ship_id <= 0:
             raise ValueError("ship_id 必须是正整数")
+        from ..domain.recommendations import ship_bonus_ship_types
         from ..domain.ships import find_ship_brief
 
         ship = find_ship_brief(ship_id)
         if ship is None:
             raise ValueError("舰船不存在")
-        if ship["ship_type"] != ship_type:
-            raise ValueError(f"舰船「{ship['name']}」不属于舰种「{ship_type}」")
+        full_ship = _ship_with_tech_points(ship_id)
+        if full_ship is None or key not in ship_bonus_ship_types(full_ship):
+            raise ValueError(f"舰船「{ship['name']}」没有「{key}」加成")
         if ship_id in ship_ids:
             ship_ids.remove(ship_id)
         else:
             if ship[field] is True:
                 raise ValueError(f"舰船「{ship['name']}」已完成，不能录入")
             # 只统计仍存在且未完成的有效录入，避免悬空/已完成项占满名额。
-            active_ids = _active_manual_ids(ship_type, field, ship_ids)
+            active_ids = _active_manual_ids(key, field, ship_ids)
             if len(active_ids) >= limit:
-                raise ValueError(
-                    f"「{ship_type}」最多录入 {limit} 个，请先取消已有录入"
-                )
+                raise ValueError(f"「{key}」最多录入 {limit} 个，请先取消已有录入")
             ship_ids[:] = active_ids
             ship_ids.append(ship_id)
     if not ship_ids:
         targets.pop(field, None)
     if not targets:
-        manual_targets.pop(ship_type, None)
+        manual_targets.pop(key, None)
     write_config(
         {
             "next_ship_types": config["next_ship_types"],
@@ -442,6 +442,13 @@ def _toggle_manual_target(
         }
     )
     return read_config()
+
+
+def _ship_with_tech_points(ship_id: int) -> dict[str, Any] | None:
+    from ..domain.ships import list_ships
+
+    rows = list_ships({"ship_ids": [ship_id]})
+    return rows[0] if rows else None
 
 
 def _require_armament_group(config: dict[str, Any], group: str) -> str:

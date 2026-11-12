@@ -157,17 +157,24 @@ SQLite 数据库
 
 ```json
 {
-  "next_ship_types": ["战列", "重巡"],
+  "next_ship_types": ["驱逐", "正航"],
   "target_limits": {
-    "战列": {"is_idling": 1, "is_trained": 2}
+    "驱逐": {"is_idling": 1, "is_trained": 2}
   },
   "manual_targets": {
-    "战列": {"is_trained": [580, 581]}
+    "驱逐": {"is_trained": [580, 581]}
   }
 }
 ```
 
-`target_limits` 是每个舰种挂机/练级的目标数量上限（1–10）；`manual_targets` 保存手动录入的舰娘 ID，数量不超过对应上限。
+推荐目标以**加成舰种**（`tech_points.bonus_ship_type`）为单位配置，例如 `驱逐`、`正航`、`轻航`。注意这里不是舰船自身的 `ships.ship_type`（航母）：加成舰种在 Wiki 数据里已拆成正航 / 轻航，推荐也按这个口径。
+
+`next_ship_types` 的可配范围是**全部 15 个加成舰种 + 2 个自定义标签**（`RECOMMEND_TARGET_ORDER`）：
+
+- 加成舰种按 `BONUS_SHIP_TYPE_ORDER` 排列，与筛选项「加成舰种」同源。
+- 自定义标签（`小船`、`联动`）固定排在全部舰种之后，按 `CUSTOM_SHIP_TAGS` 声明顺序。
+
+`target_limits` 是每个目标的挂机/练级目标数量上限（1–10）；`manual_targets` 保存手动录入的舰娘 ID，数量不超过对应上限。
 
 数据库路径由 `DATA_DIR` 派生为：
 
@@ -264,24 +271,24 @@ GET  /api/import/result   # 下载导入结果 CSV
 推荐接口：
 
 ```text
-GET /api/next?mode=idle&ship_types=战列
-GET /api/next?mode=train&ship_types=重巡
-GET /api/next?mode=train&ship_types=战列&ship_types=重巡
+GET /api/next?mode=idle&ship_types=驱逐
+GET /api/next?mode=train&ship_types=正航
+GET /api/next?mode=train&ship_types=驱逐&ship_types=重巡
 GET /api/config
 POST /api/config
 GET /api/next-options
-GET /api/next-group?ship_types=战列&ship_types=重巡
+GET /api/next-group?ship_types=驱逐&ship_types=重巡
 GET /api/operations?limit=200
 ```
 
-`ship_types` 支持传入多个舰种；页面推荐配置会使用该参数，风帆 M/S/V 等别名会归一为同一舰种。两类接口对无效舰种的处理不同：
+`ship_types` 传加成舰种，可重复传多个。风帆 M/S/V 等别名会归一为同一加成舰种。
 
-| 接口 | 传入不存在或无候选的舰种 |
+| 接口 | 无候选时的行为 |
 | --- | --- |
-| `GET /api/next` | 返回错误，提示舰种不存在或已无可练级舰娘 |
-| `GET /api/next-group` | 返回 200，对应舰种在结果中被过滤掉；全部为空时返回空 `rows` |
+| `GET /api/next` | 返回 `{"ship": null}` |
+| `GET /api/next-group` | 返回 200，没有目标项的行被过滤；全部为空时返回空 `rows` |
 
-`GET /api/next-options` 返回全部合法舰种（`SHIP_TYPE_ORDER` 全集，并补齐数据库中已存在但常量未覆盖的舰种），并附带当前挂机与练级候选数量。
+`GET /api/next-options` 返回全部推荐目标（`ship_types`，15 个加成舰种 + 2 个标签），每项含 `ship_type`、`is_tag`、`has_priority_table`、`priority`（该舰种的属性优先级表，标签为空）以及当前挂机/练级候选数量，顺序即 `RECOMMEND_TARGET_ORDER`。
 
 推荐舰种配置与舰船现状解绑：
 
@@ -322,11 +329,24 @@ GET /api/armament-next-group?mode=both
 | `idle` | `needs_training = 是` 且 `is_idling = 否` |
 | `train` | `needs_training = 是`、`is_trained = 否` 且 `is_idling = 是` |
 
-排序规则：
+推荐以**加成舰种**为单位逐行展示（如「驱逐」「正航」各一行），行顺序即 `BONUS_SHIP_TYPE_ORDER`，与筛选项「加成舰种」同源；自定义标签行（`小船`、`联动`）排在全部舰种之后。
 
-1. 加成舰种优先级（读取 `bonus_ship_type`，不再使用舰船自身 `ship_type`）。
+**加成舰种行内候选顺序**：
+
+1. 该舰在该加成舰种下的属性优先级：取它命中的加成属性里在 `TECH_PRIORITY_BY_TYPE` 中排最前的一项（`ship_tech_priority_score()`）。
 2. 稀有度优先级。
 3. 舰船名称。
+
+候选只取真正提供该加成舰种的舰船：`tech_points.bonus_ship_type` 按 `/` 拆分后包含该舰种即可，因此一艘船可以同时出现在多行里（这正是加成舰种的语义）。
+
+#### 标签推荐
+
+`小船`、`联动` 也可直接作为推荐目标配置，与加成舰种并列展示，但排在全部舰种之后。它们与舰种的关键差异：
+
+- **不附加“需要练级 = 是”**：标签船普遍没有科技点（`needs_training = 0`），带上该条件结果恒为空。舰种行要求“需要练级 = 是”，标签行不要求。
+- **匹配用 `ships.tags`**：按 `instr('/' || tags || '/', '/标签/') > 0` 精确匹配，与筛选用同一套规则，未重刷同步的存量数据筛不到标签。
+- **行内排序不同**：标签船没有加成属性，因此没有属性优先级可用，改为 **稀有度优先级 > 实装日期（升序，空日期排最后）> 名称**。
+- **行标记**：接口返回的 `is_tag` 为 `true` 时表示标签行，前端会额外标注“标签”徽标。
 
 稀有度优先级从高到低：
 
@@ -348,7 +368,7 @@ GET /api/armament-next-group?mode=both
 | 驱逐 | 机动 > 炮击 > 装填 > 雷击 > 命中 > 其他 |
 | 潜艇 | 雷击 > 其他 |
 
-`航母` 项已细化为 `正航` 与 `轻航`，二者共用原航母排序规则。
+没有独立表的加成舰种（战巡、超巡、重炮、潜母、维修、运输、风帆、航战）统一走 `DEFAULT_TECH_PRIORITY`，它们仍可作为科技点行被配置与推荐，只是组内顺序退化为默认优先级。
 
 #### 自定义标签
 
@@ -371,8 +391,7 @@ GET /api/armament-next-group?mode=both
 - **多标签共存**：一艘舰船可同时命中多个标签，`tags` 用 `/` 拼接，例如既是小船又是联动的舰船写成 `小船/联动`。
 - **未同步时筛不到**：存量库升级后 `tags` 为空，此时按标签筛选为空、推荐计数为 0，跑一次全量同步即可补齐。舰种筛选不依赖标签，始终可用。这样标签与“同步产出的数据”语义一致，也适用于未来依赖 Wiki 抓取、无法用本地字段推导的标签。
 - **匹配方式**：`ships.tags` 按 `/` 分隔，筛选用 `instr('/' || tags || '/', '/标签/') > 0` 做成员精确匹配，不会因子串误命中。
-- **筛选与配置**：标签并入“舰种”筛选项，排在常规舰种之后；也可配置为推荐舰种（`next_ship_types`），推荐排序固定在所有舰种之后（`CUSTOM_RECOMMEND_SHIP_TYPE_RANK`）。
-- **候选限制**：标签本身就允许无科技点（小船即是），因此以标签出推荐候选时不附加“需要练级 = 是”。
+- **筛选与配置**：标签并入“舰种”筛选项，排在常规舰种之后；也可直接作为推荐目标配置（见下节“标签推荐”）。
 - **展示**：练级列表的舰种列显示为 `原舰种（标签1、标签2）`。
 
 ### 4. 页面 Tab 分区
@@ -526,8 +545,8 @@ Web 页面筛选：
 - 筛选项末尾（“已练级”之后）为“完成状态”，可选“全部”与“未完成”，默认选中“未完成”；“未完成”筛选未挂机或未练级的舰船（两项都已完成才算完成），与“已挂机”“已练级”筛选按 AND 组合。
 - 各筛选项顺序固定由后端 `/api/filter-options` 下发，前端不再按数据排序。
 - 舰种与加成属性同时筛选时按 AND 组合；若要按“某舰船提供的加成面向哪个舰种”筛选，请使用“加成舰种”。
-- 推荐舰种点选即保存、取消即删除，配置保存在 `data/config.json` 的 `next_ship_types`；可选舰种仅包含仍存在可练级舰娘的类型。
-- 每个舰种的挂机/练级目标数量保存在 `target_limits`，手动录入舰娘保存在 `manual_targets`。
+- 推荐目标点选即保存、取消即删除，配置保存在 `data/config.json` 的 `next_ship_types`；可选项是 15 个加成舰种 + 2 个自定义标签。
+- 每个舰种的挂机/练级目标数量保存在 `target_limits`，手动录入舰娘保存在 `manual_targets`，键都是加成舰种。
 - 推荐结果按舰种逐行展示挂机与练级目标，并提供“挂机完成”“练级完成”快捷按钮；操作后自动刷新表格与推荐数据。
 - 推荐表格的类型列展示该行当前的待办数量：舰种行显示“待挂机 / 待练级”，兵装行显示“待打造 / 待强化”。舰种行的计数与舰种徽标同源（需要练级且未练级，其中未挂机计入待挂机、已挂机计入待练级），兵装行与兵装推荐分组徽标同源。
 - 页面顶部提供“操作历史”弹窗，记录状态更新、删除、清空和 CSV 导入等操作内容与毫秒级时间点。

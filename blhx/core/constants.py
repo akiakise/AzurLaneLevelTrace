@@ -203,6 +203,50 @@ DEFAULT_TECH_PRIORITY = [
     "反潜",
 ]
 
+# 推荐目标以**加成舰种**为单位（`tech_points.bonus_ship_type`，如 正航/轻航/驱逐），
+# 不是舰船自身的 `ships.ship_type`（航母）。
+# 自定义标签（小船/联动）同样可以作为推荐目标，排在全部加成舰种之后。
+RECOMMEND_TECH_SHIP_TYPES = list(BONUS_SHIP_TYPE_ORDER)
+# 可配置的推荐目标全集：加成舰种 + 自定义标签。
+RECOMMEND_TARGET_ORDER = [*RECOMMEND_TECH_SHIP_TYPES, *CUSTOM_SHIP_TAGS]
+
+
+def recommend_target_sort_key(value: str) -> tuple[int, str]:
+    """推荐目标（加成舰种 / 自定义标签）的展示顺序。
+
+    加成舰种按 `BONUS_SHIP_TYPE_ORDER`；标签固定排在全部舰种之后，
+    按 `CUSTOM_SHIP_TAGS` 的声明顺序。
+    """
+    if value in CUSTOM_SHIP_TAGS:
+        return (
+            len(RECOMMEND_TECH_SHIP_TYPES) + CUSTOM_SHIP_TAGS.index(value),
+            value,
+        )
+    if value in BONUS_SHIP_TYPE_RANK:
+        return (BONUS_SHIP_TYPE_RANK[value], value)
+    return (len(RECOMMEND_TARGET_ORDER), value)
+
+
+def tech_priority_order(ship_type: str) -> list[str]:
+    """某加成舰种的属性优先级；没有独立表的舰种走 DEFAULT_TECH_PRIORITY。"""
+    table = TECH_PRIORITY_BY_TYPE.get(ship_type)
+    return table if table is not None else DEFAULT_TECH_PRIORITY
+
+
+def ship_tech_priority_score(ship_type: str, attributes) -> int:
+    """舰船在某加成舰种下的优先级得分，越小越优先。
+
+    取该舰在该加成舰种下命中属性里最靠前的一条；一个都没命中返回表长（排在表尾）。
+    `attributes` 是 iterable，元素为该舰在该加成舰种下的加成属性。
+    """
+    order = tech_priority_order(ship_type)
+    ranks = [
+        order.index(attribute) if attribute in order else len(order)
+        for attribute in attributes
+    ]
+    return min(ranks) if ranks else len(order)
+
+
 TECH_STAGE_FIELDS = {
     "解锁图鉴": "解锁图鉴属性加成",
     "达到120级": "达到120级属性加成",

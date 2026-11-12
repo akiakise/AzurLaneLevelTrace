@@ -11,8 +11,8 @@ const writes = [
   ['录入舰娘', '/api/manual-target', api => api.togglePickerShip(1, '古鹰')],
   ['调整上限', '/api/target-limit', api => api.changeTargetLimit('重巡', 'is_idling', 1)],
   ['取消录入', '/api/manual-target', api => api.removeManualTarget('重巡', 'is_idling', 1)],
-  ['清空录入', '/api/manual-target', api => api.clearShipPickerTarget()],
-  ['推荐舰种', '/api/config', api => api.toggleNextType('驱逐')],
+  ['清空录入', '/api/manual-target', api => { api.seed(); return api.clearShipPickerTarget(); }],
+  ['推荐舰种', '/api/config', api => api.toggleNextShipType('驱逐')],
 ];
 for (const [label, url, action] of writes) {
   const h = createHarness();
