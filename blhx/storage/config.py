@@ -10,7 +10,7 @@ from ..core.constants import (
     ARMAMENT_MANUAL_FIELDS,
     CONFIG_PATH,
     LOGGER,
-    bonus_ship_type_sort_key,
+    recommend_target_sort_key,
     normalize_ship_type,
 )
 from .db import get_connection
@@ -46,7 +46,7 @@ def _normalize_ship_type_list(value: Any) -> list[str]:
         ship_type = normalize_ship_type(item)
         if ship_type and ship_type not in ship_types:
             ship_types.append(ship_type)
-    return sorted(ship_types, key=bonus_ship_type_sort_key)
+    return sorted(ship_types, key=recommend_target_sort_key)
 
 
 def _normalize_ship_ids(value: Any) -> list[int]:

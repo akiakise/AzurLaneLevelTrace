@@ -205,26 +205,58 @@ DEFAULT_TECH_PRIORITY = [
 
 # 推荐目标以**加成舰种**为单位（`tech_points.bonus_ship_type`，如 正航/轻航/驱逐），
 # 不是舰船自身的 `ships.ship_type`（航母）。
-# 自定义标签（小船/联动）同样可以作为推荐目标，排在全部加成舰种之后。
+# 自定义标签（小船/联动）同样可以作为推荐目标，固定排在全部舰种之后。
 RECOMMEND_TECH_SHIP_TYPES = list(BONUS_SHIP_TYPE_ORDER)
 # 可配置的推荐目标全集：加成舰种 + 自定义标签。
 RECOMMEND_TARGET_ORDER = [*RECOMMEND_TECH_SHIP_TYPES, *CUSTOM_SHIP_TAGS]
 
+# 推荐配置芯片与推荐表格的固定展示顺序（与筛选项 `BONUS_SHIP_TYPE_ORDER` 刻意分开：
+# 那套是筛选按钮顺序，这套只服务于推荐）。
+# 未列出的加成舰种归入“其他”，按名称拼音排序；自定义标签固定排在最后。
+RECOMMEND_SHIP_TYPE_DISPLAY_ORDER = [
+    "战列",
+    "战巡",
+    "正航",
+    "轻航",
+    "航战",
+    "重炮",
+    "超巡",
+    "重巡",
+    "轻巡",
+    "驱逐",
+]
+RECOMMEND_DISPLAY_RANK = {
+    value: index for index, value in enumerate(RECOMMEND_SHIP_TYPE_DISPLAY_ORDER)
+}
+# “其他”分组与标签的档位，接在固定列表之后。
+_RECOMMEND_OTHER_RANK = len(RECOMMEND_SHIP_TYPE_DISPLAY_ORDER)
+_RECOMMEND_TAG_RANK = _RECOMMEND_OTHER_RANK + 1
 
-def recommend_target_sort_key(value: str) -> tuple[int, str]:
+
+def recommend_target_sort_key(value: str) -> tuple[int, str, str]:
     """推荐目标（加成舰种 / 自定义标签）的展示顺序。
 
-    加成舰种按 `BONUS_SHIP_TYPE_ORDER`；标签固定排在全部舰种之后，
-    按 `CUSTOM_SHIP_TAGS` 的声明顺序。
+    固定顺序：`RECOMMEND_SHIP_TYPE_DISPLAY_ORDER`（战列 > 战巡 > 正航 > 轻航 >
+    航战 > 重炮 > 超巡 > 重巡 > 轻巡 > 驱逐）→ 其他舰种（按名称拼音）→ 标签。
+    自定义标签之间按 `CUSTOM_SHIP_TAGS` 的声明顺序。配置芯片与推荐表格共用本函数。
     """
     if value in CUSTOM_SHIP_TAGS:
         return (
-            len(RECOMMEND_TECH_SHIP_TYPES) + CUSTOM_SHIP_TAGS.index(value),
+            _RECOMMEND_TAG_RANK,
+            CUSTOM_SHIP_TAGS.index(value),
+            SHIP_TYPE_PINYIN.get(value, value),
+        )
+    if value in RECOMMEND_DISPLAY_RANK:
+        return (
+            RECOMMEND_DISPLAY_RANK[value],
+            SHIP_TYPE_PINYIN.get(value, value),
             value,
         )
-    if value in BONUS_SHIP_TYPE_RANK:
-        return (BONUS_SHIP_TYPE_RANK[value], value)
-    return (len(RECOMMEND_TARGET_ORDER), value)
+    return (
+        _RECOMMEND_OTHER_RANK,
+        SHIP_TYPE_PINYIN.get(value, value),
+        value,
+    )
 
 
 def tech_priority_order(ship_type: str) -> list[str]:

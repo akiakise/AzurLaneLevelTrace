@@ -67,13 +67,14 @@ def tech_priority_rank(ship: dict[str, Any], ship_type: str = "") -> int:
 def list_tech_ship_type_options() -> list[dict[str, Any]]:
     """可配置的推荐目标：全部加成舰种 + 自定义标签（`RECOMMEND_TARGET_ORDER`）。
 
-    顺序：加成舰种按 `BONUS_SHIP_TYPE_ORDER`，标签排在全部舰种之后；
+    顺序固定为 `recommend_target_sort_key()`：战列 > 战巡 > 正航 > 轻航 > 航战 >
+    重炮 > 超巡 > 重巡 > 轻巡 > 驱逐 > 其他（按名称）> 标签。
     每项附带当前待挂机 / 待练级数量，口径与推荐候选一致。
     """
     counts = _pending_counts()
     tag_counts = _pending_tag_counts()
     options: list[dict[str, Any]] = []
-    for target in RECOMMEND_TARGET_ORDER:
+    for target in sorted(RECOMMEND_TARGET_ORDER, key=recommend_target_sort_key):
         is_tag = target in CUSTOM_SHIP_TAGS
         bucket = (tag_counts if is_tag else counts).get(target, {})
         options.append(

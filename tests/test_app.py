@@ -19,6 +19,7 @@ from blhx.storage.config import (
 )
 from blhx.core.constants import (
     DEFAULT_TECH_PRIORITY,
+    RECOMMEND_SHIP_TYPE_DISPLAY_ORDER,
     RECOMMEND_TECH_SHIP_TYPES,
     ship_tech_priority_score,
     tech_priority_order,
@@ -922,10 +923,10 @@ class AppTests(unittest.TestCase):
                         "armament_manual_targets": {},
                     },
                 )
-            # 多个舰种按 BONUS_SHIP_TYPE_ORDER 落盘，重复项去重。
-            saved = save_next_ship_types(["战列", "驱逐", "战列"])
-            self.assertEqual(saved, ["驱逐", "战列"])
-            self.assertEqual(read_config()["next_ship_types"], ["驱逐", "战列"])
+            # 多个舰种按推荐展示顺序落盘，重复项去重。
+            saved = save_next_ship_types(["驱逐", "战列", "驱逐"])
+            self.assertEqual(saved, ["战列", "驱逐"])
+            self.assertEqual(read_config()["next_ship_types"], ["战列", "驱逐"])
             # 不在推荐范围内的舰种（如舰船自身舰种「航母」）被拒绝。
             with self.assertRaises(ValueError):
                 save_next_ship_types(["航母"])
@@ -1060,15 +1061,13 @@ class AppTests(unittest.TestCase):
             self.assertEqual(
                 [ship["name"] for ship in ships], ["古鹰", "武藏"]
             )
+            # next_ship 按固定展示顺序取第一个有候选的舰种，战列在重巡之前。
             self.assertEqual(
                 next_ship(
                     "train",
-                    ship_types=[
-                        tech_point("战列", "耐久"),
-                        tech_point("重巡", "机动"),
-                    ],
+                    ship_types=[tech_point("战列", "耐久"), tech_point("重巡", "机动")],
                 )["name"],
-                "古鹰",
+                "武藏",
             )
             self.assertIsNone(
                 next_ship("idle", ship_types=[tech_point("重巡", "机动")])
@@ -1077,14 +1076,14 @@ class AppTests(unittest.TestCase):
                 "both",
                 [tech_point("重巡", "机动"), tech_point("战列", "耐久")],
             )
-            # 行顺序由 BONUS_SHIP_TYPE_ORDER 决定：重巡在战列之前。
+            # 行顺序由固定展示顺序决定：战列在重巡之前。
             self.assertEqual(
-                [row["ship_type"] for row in grouped], ["重巡", "战列"]
+                [row["ship_type"] for row in grouped], ["战列", "重巡"]
             )
             self.assertIsNone(grouped[0]["idle"])
-            self.assertEqual(grouped[0]["train"]["name"], "古鹰")
+            self.assertEqual(grouped[0]["train"]["name"], "武藏")
             self.assertIsNone(grouped[1]["idle"])
-            self.assertEqual(grouped[1]["train"]["name"], "武藏")
+            self.assertEqual(grouped[1]["train"]["name"], "古鹰")
 
             update_ship_status(heavy_cruiser["id"], "is_trained", True)
             # 没有可推荐舰娘时返回 None，不再抛“舰种不可用”错误。
@@ -2260,7 +2259,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("断言: true", result.stdout)
 
     def test_recommend_order_and_empty_types_hidden(self):
-        """推荐行按加成舰种顺序（BONUS_SHIP_TYPE_ORDER）排列；没有候选的行必须隐藏。"""
+        """推荐行按固定展示顺序排列；没有候选的行必须隐藏。"""
         with isolated_app_data():
             with get_connection() as connection:
                 for name, ship_type, attribute in [
@@ -2290,10 +2289,12 @@ class AppTests(unittest.TestCase):
             rows = next_ships_by_type(
                 "both", ["运输", "轻巡", "驱逐", "轻航", "战列", "重炮"]
             )
-            # 顺序由 BONUS_SHIP_TYPE_ORDER 决定（驱逐<轻巡<战列<轻航<重炮<运输）。
+            # 固定顺序：战列 > 战巡 > 正航 > 轻航 > 航战 > 重炮 > 超巡 > 重巡 >
+            # 轻巡 > 驱逐 > 其他（按名称）> 标签。这里命中的是战列/轻航/重炮/轻巡/驱逐/运输，
+            # 运输属于“其他”，排在所有固定舰种之后。
             self.assertEqual(
                 [row["ship_type"] for row in rows],
-                ["驱逐", "轻巡", "战列", "轻航", "重炮", "运输"],
+                ["战列", "轻航", "重炮", "轻巡", "驱逐", "运输"],
             )
 
             # 配置了但没有对应舰船的舰种行不出现。
@@ -2411,8 +2412,9 @@ class AppTests(unittest.TestCase):
             ]
             rows = next_ships_by_type("both", keys)
             # 重巡行两个模式都为空被过滤；战列只剩练级目标。
+            # 固定顺序里战列在驱逐之前。
             self.assertEqual(
-                [row["ship_type"] for row in rows], ["驱逐", "战列"]
+                [row["ship_type"] for row in rows], ["战列", "驱逐"]
             )
             by_type = {row["ship_type"]: row for row in rows}
             self.assertTrue(by_type["战列"]["train_items"])
@@ -2499,9 +2501,16 @@ class AppTests(unittest.TestCase):
     def test_tag_recommendation_options_include_tags_last(self):
         """推荐目标 = 15 个加成舰种 + 2 个自定义标签，标签排在全部舰种之后。"""
         with isolated_app_data():
+            # 固定展示顺序：战列 > 战巡 > 正航 > 轻航 > 航战 > 重炮 > 超巡 > 重巡 >
+            # 轻巡 > 驱逐 > 其他（按名称）> 标签。
             self.assertEqual(
                 [item["ship_type"] for item in available_next_ship_types()],
-                [*RECOMMEND_TECH_SHIP_TYPES, *CUSTOM_SHIP_TAGS],
+                [
+                    *RECOMMEND_SHIP_TYPE_DISPLAY_ORDER,
+                    # 未列入固定顺序的加成舰种归入“其他”，按名称拼音排序。
+                    "风帆", "潜母", "潜艇", "维修", "运输",
+                    *CUSTOM_SHIP_TAGS,
+                ],
             )
             options = {item["ship_type"]: item for item in available_next_ship_types()}
             self.assertFalse(options["驱逐"]["is_tag"])
@@ -2510,7 +2519,7 @@ class AppTests(unittest.TestCase):
             # 标签没有属性优先级表。
             self.assertFalse(options["小船"]["has_priority_table"])
             self.assertEqual(options["小船"]["priority"], [])
-            # 标签可以与舰种一起配置。
+            # 标签可以与舰种一起配置，落盘同样按固定展示顺序。
             self.assertEqual(
                 save_next_ship_types(["联动", "驱逐", "小船"]),
                 ["驱逐", "小船", "联动"],

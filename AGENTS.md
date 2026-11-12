@@ -44,7 +44,8 @@
 - “加成舰种”和“加成属性”来自 `tech_points.bonus_ship_type` / `tech_points.bonus_attribute`；`tech_points.attribute` 仅保留原始展示文本。
 - 推荐目标以**加成舰种**（`tech_points.bonus_ship_type`，如 正航/轻航/驱逐）为单位配置与推荐，不是舰船自身 `ships.ship_type`（航母）。
 - 自定义标签（`小船`、`联动`）同样可作为推荐目标，排在全部加成舰种之后；全集见 `RECOMMEND_TARGET_ORDER`，统一用 `recommend_target_sort_key()` 排序。
-- 加成舰种行顺序即 `BONUS_SHIP_TYPE_ORDER`；行内候选按 `ship_tech_priority_score()`（该舰在该加成舰种下命中的最优属性在优先级表中的序号）、稀有度、名称排序。
+- 推荐配置芯片与推荐表格行共用同一固定顺序，由 `recommend_target_sort_key()` 决定：战列 > 战巡 > 正航 > 轻航 > 航战 > 重炮 > 超巡 > 重巡 > 轻巡 > 驱逐 > 其他（按名称拼音）> 标签。顺序表为 `RECOMMEND_SHIP_TYPE_DISPLAY_ORDER`，与筛选项 `BONUS_SHIP_TYPE_ORDER` 刻意分开，不要合并。
+- 行内候选按 `ship_tech_priority_score()`（该舰在该加成舰种下命中的最优属性在优先级表中的序号）、稀有度、名称排序。
 - 标签行不附加“需要练级 = 是”（标签船普遍无科技点，否则结果恒为空），按 `ships.tags` 匹配，行内按稀有度 > 实装日期 > 名称排序；返回行的 `is_tag` 标记该行是标签行。
 - 没有独立优先级表的加成舰种（战巡/超巡/重炮/潜母/维修/运输/风帆/航战）走 `DEFAULT_TECH_PRIORITY`，仍可被配置与推荐。`bonus_ship_type` 为多值（如 `重巡/重炮/超巡`）时按 `/` 拆分，同一艘船可以同时出现在多行。
 - 推荐舰种点选即保存、取消即删除，页面用右下角 toast 提示，不再有“确认推荐”按钮。

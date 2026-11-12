@@ -171,10 +171,23 @@ SQLite 数据库
 
 `next_ship_types` 的可配范围是**全部 15 个加成舰种 + 2 个自定义标签**（`RECOMMEND_TARGET_ORDER`）：
 
-- 加成舰种按 `BONUS_SHIP_TYPE_ORDER` 排列，与筛选项「加成舰种」同源。
+- 展示顺序固定，见下方“推荐目标的固定顺序”（配置芯片与推荐表格共用同一顺序）。
 - 自定义标签（`小船`、`联动`）固定排在全部舰种之后，按 `CUSTOM_SHIP_TAGS` 声明顺序。
 
 `target_limits` 是每个目标的挂机/练级目标数量上限（1–10）；`manual_targets` 保存手动录入的舰娘 ID，数量不超过对应上限。
+
+#### 推荐目标的固定顺序
+
+推荐舰种配置芯片与推荐表格行都按同一个固定顺序展示（`RECOMMEND_SHIP_TYPE_DISPLAY_ORDER` + `recommend_target_sort_key()`）：
+
+```text
+战列 > 战巡 > 正航 > 轻航 > 航战 > 重炮 > 超巡 > 重巡 > 轻巡 > 驱逐
+     > 其他（按名称拼音排序） > 标签（小船、联动）
+```
+
+“其他”指未列入前 10 位的加成舰种（当前为潜艇、潜母、维修、运输、风帆），按 `SHIP_TYPE_PINYIN` 的拼音排序。自定义标签固定排在最后。
+
+注意这套顺序与筛选项「加成舰种」的 `BONUS_SHIP_TYPE_ORDER` 刻意分开：后者只决定筛选按钮顺序，两处不要合并。配置落盘时也按本顺序规范化（`save_next_ship_types()`）。
 
 数据库路径由 `DATA_DIR` 派生为：
 
@@ -329,7 +342,7 @@ GET /api/armament-next-group?mode=both
 | `idle` | `needs_training = 是` 且 `is_idling = 否` |
 | `train` | `needs_training = 是`、`is_trained = 否` 且 `is_idling = 是` |
 
-推荐以**加成舰种**为单位逐行展示（如「驱逐」「正航」各一行），行顺序即 `BONUS_SHIP_TYPE_ORDER`，与筛选项「加成舰种」同源；自定义标签行（`小船`、`联动`）排在全部舰种之后。
+推荐以**加成舰种**为单位逐行展示（如「驱逐」「正航」各一行），行顺序即上文「推荐目标的固定顺序」：战列 > 战巡 > 正航 > 轻航 > 航战 > 重炮 > 超巡 > 重巡 > 轻巡 > 驱逐 > 其他（按名称）> 标签。
 
 **加成舰种行内候选顺序**：
 
