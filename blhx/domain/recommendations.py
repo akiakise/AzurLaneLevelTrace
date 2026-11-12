@@ -122,34 +122,43 @@ def _pending_counts() -> dict[str, dict[str, int]]:
     """按加成舰种统计待挂机与待练级数量。
 
     待挂机 = 需要练级、未练级且未挂机；待练级 = 需要练级、未练级且已挂机。
-    一艘船可以在多个加成舰种下各计一次。
+    一艘船可以在多个加成舰种下各计一次，但**同一加成舰种内只计一次**：
+    一艘船常常有多条科技点（如「奇尔沙治」同时有耐久与炮击两条，
+    bonus_ship_type 都是「战巡/战列/航战」），按 tech_points 行聚合会把
+    同一艘船重复累加，数量与推荐列表对不上。
     """
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT tp.bonus_ship_type,
-                   SUM(CASE WHEN COALESCE(s.is_idling, 0) = 0 THEN 1 ELSE 0 END)
-                       AS idle_count,
-                   SUM(CASE WHEN s.is_idling = 1 THEN 1 ELSE 0 END) AS train_count
+            SELECT s.id,
+                   tp.bonus_ship_type,
+                   COALESCE(s.is_idling, 0) AS is_idling
             FROM tech_points tp
             JOIN ships s ON s.id = tp.ship_id
             WHERE tp.bonus_ship_type <> ''
               AND s.needs_training = 1
               AND COALESCE(s.is_trained, 0) = 0
-            GROUP BY tp.bonus_ship_type
             """
         ).fetchall()
+    # (加成舰种, 舰船 ID) 去重后再计数，避免同舰多条科技点被重复累加。
+    seen: set[tuple[str, int]] = set()
     counts: dict[str, dict[str, int]] = {}
     for row in rows:
         for bonus_ship_type in row["bonus_ship_type"].split("/"):
             bonus_ship_type = normalize_ship_type(bonus_ship_type)
             if not bonus_ship_type:
                 continue
+            key = (bonus_ship_type, row["id"])
+            if key in seen:
+                continue
+            seen.add(key)
             bucket = counts.setdefault(
                 bonus_ship_type, {"idle_count": 0, "train_count": 0}
             )
-            bucket["idle_count"] += int(row["idle_count"] or 0)
-            bucket["train_count"] += int(row["train_count"] or 0)
+            if row["is_idling"]:
+                bucket["train_count"] += 1
+            else:
+                bucket["idle_count"] += 1
     return counts
 
 

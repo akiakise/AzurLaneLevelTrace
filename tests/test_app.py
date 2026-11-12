@@ -2498,6 +2498,56 @@ class AppTests(unittest.TestCase):
             self.assertEqual(rows[key]["idle_count"], option["idle_count"])
             self.assertEqual(rows[key]["train_count"], option["train_count"])
 
+    def test_pending_counts_dedupe_multi_tech_point_ships(self):
+        """一艘船有多条科技点时，同一加成舰种内只能计一次。
+
+        正式库的「奇尔沙治」有耐久与炮击两条科技点，bonus_ship_type 都是
+        「战巡/战列/航战」；按 tech_points 行聚合会把同一艘船重复累加，
+        导致战列「待挂机 = 2」而实际只剩 1 艘。
+        """
+        with isolated_app_data():
+            with get_connection() as connection:
+                insert_ship(
+                    connection,
+                    "奇尔沙治",
+                    "2024-01-01",
+                    {
+                        "ship_type": "航战",
+                        "rarity": "海上传奇",
+                        "tech_points": [
+                            {
+                                "stage": "解锁图鉴",
+                                "attribute": "战巡/战列/航战 耐久",
+                                "points": 0,
+                            },
+                            {
+                                "stage": "达到120级",
+                                "attribute": "战巡/战列/航战 炮击",
+                                "points": 0,
+                            },
+                        ],
+                    },
+                )
+            # 三个加成舰种各计 1 艘，不能因两条科技点翻倍。
+            for ship_type in ("战巡", "战列", "航战"):
+                option = next(
+                    item
+                    for item in available_next_ship_types()
+                    if item["ship_type"] == ship_type
+                )
+                self.assertEqual(
+                    option["idle_count"], 1, f"{ship_type} 待挂机数量被重复计数"
+                )
+                self.assertEqual(option["train_count"], 0)
+
+            # 行内计数与实际推荐候选数必须一致。
+            rows = next_ships_by_type(
+                "idle",
+                ["战列"],
+                target_limits={"战列": {"is_idling": 10, "is_trained": 1}},
+            )
+            self.assertEqual(len(rows[0]["idle_items"]), rows[0]["idle_count"])
+
     def test_tag_recommendation_options_include_tags_last(self):
         """推荐目标 = 15 个加成舰种 + 2 个自定义标签，标签排在全部舰种之后。"""
         with isolated_app_data():
